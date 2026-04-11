@@ -1,0 +1,153 @@
+{
+  "name": "xml-xslt-studio",
+  "displayName": "XSLT Studio",
+  "description": "Transform XML with XSLT and validate UBL 2.1 documents (XSD + EN16931 + Peppol BIS 3.0). Only requires Java — everything else is bundled.",
+  "version": "1.0.0",
+  "publisher": "am-vs-tools",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/andrei191999/xml-xslt-studio"
+  },
+  "bugs": {
+    "url": "https://github.com/andrei191999/xml-xslt-studio/issues"
+  },
+  "homepage": "https://github.com/andrei191999/xml-xslt-studio#readme",
+  "icon": "icon.png",
+  "keywords": [
+    "xslt",
+    "xml",
+    "ubl",
+    "validation",
+    "en16931",
+    "peppol",
+    "invoice",
+    "schematron",
+    "xsd"
+  ],
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Linters",
+    "Formatters"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "xml-xslt-studio.transform",
+        "title": "XSLT: Transform XML",
+        "icon": "$(symbol-misc)"
+      },
+      {
+        "command": "xml-xslt-studio.validateUbl",
+        "title": "UBL: Validate Document",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "xml-xslt-studio.validateUblXsd",
+        "title": "UBL: Validate XSD Only"
+      },
+      {
+        "command": "xml-xslt-studio.validateUblBusinessRules",
+        "title": "UBL: Validate Business Rules Only"
+      },
+      {
+        "command": "xml-xslt-studio.aiFixAll",
+        "title": "UBL: Fix All Errors with AI"
+      },
+      {
+        "command": "xml-xslt-studio.aiSetApiKey",
+        "title": "UBL: Set AI API Key"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "xml-xslt-studio.transform",
+          "group": "navigation"
+        },
+        {
+          "command": "xml-xslt-studio.validateUbl",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "xml-xslt-studio.transform"
+        },
+        {
+          "command": "xml-xslt-studio.validateUbl"
+        },
+        {
+          "command": "xml-xslt-studio.validateUblXsd"
+        },
+        {
+          "command": "xml-xslt-studio.validateUblBusinessRules"
+        },
+        {
+          "command": "xml-xslt-studio.aiFixAll"
+        },
+        {
+          "command": "xml-xslt-studio.aiSetApiKey"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "UBL Validator AI",
+      "properties": {
+        "ublValidator.ai.provider": {
+          "type": "string",
+          "enum": [
+            "gemini",
+            "groq",
+            "anthropic",
+            "openai"
+          ],
+          "default": "gemini",
+          "description": "AI provider to use for fix suggestions. Gemini and Groq are free, Anthropic and OpenAI are paid."
+        },
+        "ublValidator.ai.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model to use (leave empty for provider default: gemini-2.0-flash for Gemini, llama-3.3-70b-versatile for Groq, claude-sonnet-4-20250514 for Anthropic, gpt-4o for OpenAI)."
+        },
+        "ublValidator.ai.maxRetries": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Maximum number of retry attempts if a fix does not resolve the error."
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "xml-xslt-studio.validateUbl",
+        "key": "ctrl+shift+v",
+        "mac": "cmd+shift+v",
+        "when": "editorTextFocus"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile:java && npm run compile",
+    "compile": "tsc -p ./",
+    "compile:java": "javac -source 8 -target 8 -d lib/classes java/XsdValidator.java",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^18.x",
+    "@types/vscode": "^1.74.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.0.0"
+  }
+}
