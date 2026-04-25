@@ -1,119 +1,308 @@
-import * as vscode from 'vscode';
 import * as path from 'path';
-import { detectUblDocument } from '../validation/documentDetector';
+import * as vscode from 'vscode';
+import { ProgressLocation } from 'vscode';
+
+import { detectUblDocumentFromContent } from '../validation/documentDetector';
 import { validateXsd } from '../validation/xsdValidator';
 import { validateSchematron } from '../validation/schematronValidator';
-import { reportDiagnostics, showSummaryNotification } from '../validation/diagnosticsReporter';
-import { ValidationResult, ValidationScope, ValidationIssue } from '../validation/types';
-import { getDiagnosticCollection } from '../extension';
+import { validateHelger } from '../validation/helgerValidator';
+import { reportDiagnostics } from '../validation/diagnosticsReporter';
+import { IssueSeverity, ValidationIssue, SchematronRuleset } from '../validation/types';
+import { getConfig } from '../config/settings';
+import { getActiveJarsDir } from '../utils/javaRunner';
+import { ts } from '../utils/execAsync';
+import { PanelManager } from '../webview/panelManager';
+import { buildIssueSummaries, countIssueSummaries } from '../webview/issueSummaries';
 
-function getArtifactsPath(context: vscode.ExtensionContext): string {
-    return path.join(context.extensionPath, 'validation-artifacts');
+// ---------------------------------------------------------------------------
+// createValidateDocumentCommand — full validation (XSD + Schematron + Helger)
+// ---------------------------------------------------------------------------
+
+function logIssueSummary(outputChannel: vscode.OutputChannel, tag: string, issues: ValidationIssue[]): void {
+    const errors   = issues.filter(i => i.severity === IssueSeverity.Error).length;
+    const warnings = issues.filter(i => i.severity === IssueSeverity.Warning).length;
+    if (errors === 0 && warnings === 0) {
+        outputChannel.appendLine(`[${tag}] OK — no issues`);
+    } else {
+        outputChannel.appendLine(`[${tag}] ${errors} error(s), ${warnings} warning(s)`);
+    }
 }
 
-export function createValidateCommand(
+export function createValidateDocumentCommand(
     context: vscode.ExtensionContext,
-    scope: ValidationScope
+    local: vscode.DiagnosticCollection,
+    helger: vscode.DiagnosticCollection,
+    outputChannel: vscode.OutputChannel,
 ): () => Promise<void> {
     return async () => {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
-            vscode.window.showWarningMessage('No active editor. Open an XML file first.');
+            vscode.window.showErrorMessage('No active editor — open a UBL XML document first.');
             return;
         }
 
         const document = editor.document;
-        if (document.isUntitled) {
-            vscode.window.showWarningMessage('Please save the file before validating.');
+        const content = document.getText();
+        const artifactsPath = path.join(context.extensionPath, 'validation-artifacts');
+        const extensionPath = context.extensionPath;
+
+        const docInfo = detectUblDocumentFromContent(content, artifactsPath);
+        if (docInfo === null) {
+            vscode.window.showInformationMessage('Not a recognized UBL document — validation skipped');
+            const issue: ValidationIssue = {
+                severity: IssueSeverity.Information,
+                message: 'Not a recognized UBL document — validation skipped.',
+                source: 'local-xsd',
+                line: 1,
+                column: 0,
+            };
+            local.delete(document.uri);
+            helger.delete(document.uri);
+            reportDiagnostics(local, helger, document.uri, [issue], new Map());
             return;
         }
 
-        const filePath = document.uri.fsPath;
-        const artifactsPath = getArtifactsPath(context);
-        const diagnosticCollection = getDiagnosticCollection();
+        outputChannel.appendLine(`${ts()} [Validate] ${document.uri.fsPath}`);
 
-        // Clear previous diagnostics for this file
-        diagnosticCollection.delete(document.uri);
-
-        await vscode.window.withProgress({
-            location: vscode.ProgressLocation.Notification,
-            title: 'Validating UBL document...',
-            cancellable: false
-        }, async (progress) => {
-            try {
-                progress.report({ increment: 0, message: 'Detecting document type...' });
-
-                const docInfo = detectUblDocument(filePath);
-                if (!docInfo) {
-                    vscode.window.showWarningMessage(
-                        'Not a recognized UBL 2.1 document. The root element does not match any known UBL document type.'
-                    );
-                    return;
-                }
-
+        await vscode.window.withProgress(
+            { location: ProgressLocation.Notification, title: 'Validating...' },
+            async () => {
+                const config = getConfig();
                 const allIssues: ValidationIssue[] = [];
-                const result: ValidationResult = {
-                    issues: [],
-                    documentInfo: docInfo,
-                    xsdPassed: true,
-                    en16931Passed: null,
-                    peppolPassed: null,
-                };
+                const phiveJarsDir = getActiveJarsDir(extensionPath, context.globalStorageUri.fsPath);
 
-                // XSD validation
-                if (scope === 'full' || scope === 'xsd-only') {
-                    progress.report({ increment: 20, message: 'Running XSD validation...' });
-                    try {
-                        const xsdIssues = await validateXsd(filePath, docInfo, artifactsPath, context.extensionPath);
-                        allIssues.push(...xsdIssues);
-                        result.xsdPassed = xsdIssues.length === 0;
-                    } catch (error: any) {
-                        vscode.window.showErrorMessage(`XSD validation error: ${error.message}`);
-                        result.xsdPassed = false;
+                // XSD — no-op in Phase 8+ (phive handles it)
+                const xsdIssues = await validateXsd(content, docInfo, artifactsPath, extensionPath);
+                allIssues.push(...xsdIssues);
+
+                // Schematron — collect enabled rulesets
+                const rulesets: SchematronRuleset[] = [];
+                if (config.validation.enableSchematronEN16931) {
+                    rulesets.push(SchematronRuleset.EN16931);
+                }
+                if (config.validation.enableSchematronPeppol) {
+                    rulesets.push(SchematronRuleset.Peppol);
+                }
+                if (rulesets.length > 0) {
+                    if (docInfo.docType !== 'Invoice' && docInfo.docType !== 'CreditNote') {
+                        const infoIssue: ValidationIssue = {
+                            severity: IssueSeverity.Information,
+                            message: `Schematron not available for ${docInfo.docType} — EN16931/Peppol rules apply to Invoice and CreditNote only.`,
+                            source: 'local-schematron',
+                            line: 1,
+                            column: 0,
+                        };
+                        allIssues.push(infoIssue);
+                        outputChannel.appendLine(`${ts()} [Phive] skipped — not Invoice or CreditNote`);
+                    } else {
+                        outputChannel.appendLine(`${ts()} [Phive] start`);
+                        try {
+                            const schIssues = await validateSchematron(content, rulesets, artifactsPath, extensionPath, phiveJarsDir);
+                            allIssues.push(...schIssues);
+                            logIssueSummary(outputChannel, `${ts()} [Phive]`, schIssues);
+                        } catch (err: any) {
+                            outputChannel.appendLine(`${ts()} [Phive] error: ` + (err?.message ?? String(err)));
+                        }
                     }
                 }
 
-                // EN16931 business rules (Invoice and CreditNote only)
-                if ((scope === 'full' || scope === 'business-rules-only') && docInfo.isInvoiceOrCreditNote) {
-                    progress.report({ increment: 25, message: 'Checking EN16931 business rules...' });
+                // Helger (optional)
+                if (config.validation.enableHelger) {
+                    outputChannel.appendLine(`${ts()} [Helger] start`);
                     try {
-                        const en16931Issues = await validateSchematron(filePath, 'en16931', artifactsPath, context.extensionPath);
-                        allIssues.push(...en16931Issues);
-                        result.en16931Passed = en16931Issues.filter(
-                            i => i.severity === vscode.DiagnosticSeverity.Error
-                        ).length === 0;
-                    } catch (error: any) {
-                        vscode.window.showErrorMessage(`EN16931 validation error: ${error.message}`);
-                        result.en16931Passed = false;
+                        const helgerIssues = await validateHelger(content, docInfo, config);
+                        allIssues.push(...helgerIssues);
+                        logIssueSummary(outputChannel, `${ts()} [Helger]`, helgerIssues);
+                    } catch (err: any) {
+                        outputChannel.appendLine(`${ts()} [Helger] error: ` + (err?.message ?? String(err)));
                     }
                 }
 
-                // Peppol BIS 3.0 rules (Invoice and CreditNote only)
-                if ((scope === 'full' || scope === 'business-rules-only') && docInfo.isInvoiceOrCreditNote) {
-                    progress.report({ increment: 25, message: 'Checking Peppol BIS 3.0 rules...' });
+                // Summary
+                const errors   = allIssues.filter(i => i.severity === IssueSeverity.Error).length;
+                const warnings = allIssues.filter(i => i.severity === IssueSeverity.Warning).length;
+                outputChannel.appendLine(`${ts()} [Validate] done — ${errors} error(s), ${warnings} warning(s)`);
+
+                // Clear before reporting
+                local.delete(document.uri);
+                helger.delete(document.uri);
+
+                reportDiagnostics(local, helger, document.uri, allIssues, new Map());
+
+                if (allIssues.length === 0) {
+                    vscode.window.showInformationMessage('No issues found');
+                } else {
+                    vscode.window.showInformationMessage(`${allIssues.length} issues found`);
+                }
+
+                // Open/reveal panel with results — pre-fill Transform tab, switch to Results tab
+                PanelManager.createOrShow(context.extensionUri, context);
+                PanelManager.postMessage({ type: 'FILE_SELECTED', role: 'xml', fsPath: document.uri.fsPath, fileName: path.basename(document.uri.fsPath) });
+                const panelSums = buildIssueSummaries(allIssues);
+                const counts = countIssueSummaries(panelSums);
+                PanelManager.postMessage({
+                    type: 'VALIDATION_RESULT',
+                    issues: panelSums,
+                    detectedProfile: undefined,
+                    ...counts,
+                });
+                PanelManager.postMessage({ type: 'SWITCH_TAB', tab: 'results' });
+            },
+        );
+    };
+}
+
+// ---------------------------------------------------------------------------
+// createValidateXsdOnlyCommand — XSD validation only
+// ---------------------------------------------------------------------------
+
+export function createValidateXsdOnlyCommand(
+    context: vscode.ExtensionContext,
+    local: vscode.DiagnosticCollection,
+    helger: vscode.DiagnosticCollection,
+    outputChannel: vscode.OutputChannel,
+): () => Promise<void> {
+    return async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showErrorMessage('No active editor — open a UBL XML document first.');
+            return;
+        }
+
+        const document = editor.document;
+        const content = document.getText();
+        const artifactsPath = path.join(context.extensionPath, 'validation-artifacts');
+        const extensionPath = context.extensionPath;
+
+        const docInfo = detectUblDocumentFromContent(content, artifactsPath);
+        if (docInfo === null) {
+            vscode.window.showInformationMessage('Not a recognized UBL document — skipping validation');
+            local.delete(document.uri);
+            helger.delete(document.uri);
+            return;
+        }
+
+        outputChannel.appendLine(`[Validate XSD] ${document.uri.fsPath}`);
+
+        await vscode.window.withProgress(
+            { location: ProgressLocation.Notification, title: 'Validating XSD...' },
+            async () => {
+                const allIssues = await validateXsd(content, docInfo, artifactsPath, extensionPath);
+                logIssueSummary(outputChannel, 'XSD', allIssues);
+
+                local.delete(document.uri);
+                helger.delete(document.uri);
+
+                reportDiagnostics(local, helger, document.uri, allIssues, new Map());
+
+                if (allIssues.length === 0) {
+                    vscode.window.showInformationMessage('No issues found');
+                } else {
+                    vscode.window.showInformationMessage(`${allIssues.length} issues found`);
+                }
+
+                PanelManager.createOrShow(context.extensionUri, context);
+                PanelManager.postMessage({ type: 'FILE_SELECTED', role: 'xml', fsPath: document.uri.fsPath, fileName: path.basename(document.uri.fsPath) });
+                const panelSums = buildIssueSummaries(allIssues);
+                const counts = countIssueSummaries(panelSums);
+                PanelManager.postMessage({ type: 'VALIDATION_RESULT', issues: panelSums, detectedProfile: undefined, ...counts });
+                PanelManager.postMessage({ type: 'SWITCH_TAB', tab: 'results' });
+            },
+        );
+    };
+}
+
+// ---------------------------------------------------------------------------
+// createValidateBusinessRulesOnlyCommand — Schematron validation only
+// ---------------------------------------------------------------------------
+
+export function createValidateBusinessRulesOnlyCommand(
+    context: vscode.ExtensionContext,
+    local: vscode.DiagnosticCollection,
+    helger: vscode.DiagnosticCollection,
+    outputChannel: vscode.OutputChannel,
+): () => Promise<void> {
+    return async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showErrorMessage('No active editor — open a UBL XML document first.');
+            return;
+        }
+
+        const document = editor.document;
+        const content = document.getText();
+        const artifactsPath = path.join(context.extensionPath, 'validation-artifacts');
+        const extensionPath = context.extensionPath;
+
+        const docInfo = detectUblDocumentFromContent(content, artifactsPath);
+        if (docInfo === null) {
+            vscode.window.showInformationMessage('Not a recognized UBL document — skipping validation');
+            local.delete(document.uri);
+            helger.delete(document.uri);
+            return;
+        }
+
+        const config = getConfig();
+        const rulesets: SchematronRuleset[] = [];
+        if (config.validation.enableSchematronEN16931) {
+            rulesets.push(SchematronRuleset.EN16931);
+        }
+        if (config.validation.enableSchematronPeppol) {
+            rulesets.push(SchematronRuleset.Peppol);
+        }
+
+        if (rulesets.length === 0) {
+            vscode.window.showInformationMessage('No Schematron ruleset is enabled — enable EN16931 or Peppol in settings.');
+            return;
+        }
+
+        outputChannel.appendLine(`[Validate Schematron] ${document.uri.fsPath}`);
+
+        await vscode.window.withProgress(
+            { location: ProgressLocation.Notification, title: 'Validating Schematron...' },
+            async () => {
+                const allIssues: ValidationIssue[] = [];
+
+                if (docInfo.docType !== 'Invoice' && docInfo.docType !== 'CreditNote') {
+                    const infoIssue: ValidationIssue = {
+                        severity: IssueSeverity.Information,
+                        message: `Schematron not available for ${docInfo.docType} — EN16931/Peppol rules apply to Invoice and CreditNote only.`,
+                        source: 'local-schematron',
+                        line: 1,
+                        column: 0,
+                    };
+                    allIssues.push(infoIssue);
+                    outputChannel.appendLine(`[Schematron] Skipped — not Invoice or CreditNote`);
+                } else {
                     try {
-                        const peppolIssues = await validateSchematron(filePath, 'peppol', artifactsPath, context.extensionPath);
-                        allIssues.push(...peppolIssues);
-                        result.peppolPassed = peppolIssues.filter(
-                            i => i.severity === vscode.DiagnosticSeverity.Error
-                        ).length === 0;
-                    } catch (error: any) {
-                        vscode.window.showErrorMessage(`Peppol validation error: ${error.message}`);
-                        result.peppolPassed = false;
+                        const phiveJarsDir = getActiveJarsDir(extensionPath, context.globalStorageUri.fsPath);
+                        outputChannel.appendLine(`${ts()} [Phive] start`);
+                        const schIssues = await validateSchematron(content, rulesets, artifactsPath, extensionPath, phiveJarsDir);
+                        allIssues.push(...schIssues);
+                        logIssueSummary(outputChannel, `${ts()} [Phive]`, schIssues);
+                    } catch (err: any) {
+                        outputChannel.appendLine(`${ts()} [Phive] error: ` + (err?.message ?? String(err)));
                     }
                 }
 
-                result.issues = allIssues;
+                local.delete(document.uri);
+                helger.delete(document.uri);
 
-                progress.report({ increment: 20, message: 'Reporting results...' });
+                reportDiagnostics(local, helger, document.uri, allIssues, new Map());
 
-                reportDiagnostics(diagnosticCollection, document.uri, allIssues);
-                showSummaryNotification(result);
+                if (allIssues.length === 0) {
+                    vscode.window.showInformationMessage('No issues found');
+                } else {
+                    vscode.window.showInformationMessage(`${allIssues.length} issues found`);
+                }
 
-            } catch (error: any) {
-                vscode.window.showErrorMessage(`Validation failed: ${error.message}`);
-                console.error('UBL Validation Error:', error);
-            }
-        });
+                PanelManager.createOrShow(context.extensionUri, context);
+                PanelManager.postMessage({ type: 'FILE_SELECTED', role: 'xml', fsPath: document.uri.fsPath, fileName: path.basename(document.uri.fsPath) });
+                const panelSums = buildIssueSummaries(allIssues);
+                const counts = countIssueSummaries(panelSums);
+                PanelManager.postMessage({ type: 'VALIDATION_RESULT', issues: panelSums, detectedProfile: undefined, ...counts });
+                PanelManager.postMessage({ type: 'SWITCH_TAB', tab: 'results' });
+            },
+        );
     };
 }

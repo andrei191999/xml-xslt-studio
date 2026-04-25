@@ -1,147 +1,196 @@
-import * as vscode from 'vscode';
-import { execAsync, checkToolAvailable, getInstallInstructions } from '../utils/execAsync';
-import { detectUblDocumentFromContent } from '../validation/documentDetector';
-import { validateXsdFromContent } from '../validation/xsdValidator';
-import { validateSchematronFromContent } from '../validation/schematronValidator';
-import { UblDocumentInfo, ValidationIssue, ValidationResult, ValidationScope } from '../validation/types';
-import { runInstrumentedTransform, TraceEntry } from '../tracing/xsltTracer';
-import { mapIssuesToXsltSource, TracedIssue } from '../tracing/errorTraceMapper';
-import { runSaxonTransform } from '../utils/javaRunner';
+import * as path from 'path';
+import type * as vscode from 'vscode';
 
-export interface TransformResult {
-    output: string;
-    isUbl: boolean;
-    documentInfo: UblDocumentInfo | null;
-    validationResult: ValidationResult | null;
-    tracedIssues?: TracedIssue[];
-    traceEntries?: TraceEntry[];
-}
+import { runSaxonTransform, runPhiveRunner, getActiveJarsDir, PhiveRunnerIssue } from '../utils/javaRunner';
+import { ts } from '../utils/execAsync';
+import { writeTempFile } from '../utils/tempFile';
+import { detectUblDocumentFromContent } from '../validation/documentDetector';
+import { validateXsd } from '../validation/xsdValidator';
+import { validateHelger } from '../validation/helgerValidator';
+import { parseSaxonTrace } from '../tracing/saxonTracer';
+
+import type { UblDocumentInfo, ValidationIssue } from '../validation/types';
+import { IssueSeverity, SchematronRuleset } from '../validation/types';
+import type { XmlXsltConfig } from '../config/settings';
 
 export interface PipelineOptions {
-    sourceXml: string;
-    xsltStylesheet: string;
-    artifactsPath: string;
-    extensionPath: string;
-    validationScope?: ValidationScope;
-    enableTracing?: boolean;
-    onProgress?: (message: string) => void;
+    xmlContent: string;
+    xsltPath: string;           // absolute path to XSLT file
+    extensionPath: string;      // context.extensionPath
+    artifactsPath: string;      // path.join(extensionPath, 'validation-artifacts')
+    globalStorageFsPath?: string; // context.globalStorageUri.fsPath — required for phive
+    parameters?: Record<string, string>;
+    config: XmlXsltConfig;
+    cancellationToken?: vscode.CancellationToken;
+    onProgress?: (message: string, increment?: number) => void;
+    /** Called with the raw transform output immediately after Saxon finishes, before validation. */
+    onTransformComplete?: (output: string, language: string, traceMap: Map<number, vscode.Location>) => Promise<void>;
+    outputChannel?: vscode.OutputChannel;
 }
 
-export async function transformAndValidate(options: PipelineOptions): Promise<TransformResult> {
-    const { sourceXml, xsltStylesheet, artifactsPath, extensionPath, validationScope = 'full', enableTracing = false, onProgress } = options;
+export interface PipelineResult {
+    output: string;
+    outputLanguage: string;     // 'xml', 'html', or 'text'
+    isUbl: boolean;
+    documentInfo: UblDocumentInfo | null;
+    issues: ValidationIssue[];
+    traceMap: Map<number, vscode.Location>;
+    detectedProfile: string | undefined; // phive DDD-detected VESID, passed to callers
+}
 
-    const progress = (msg: string) => onProgress?.(msg);
+function mapPhiveIssues(issues: PhiveRunnerIssue[]): ValidationIssue[] {
+    return issues.map(p => ({
+        severity: p.severity === 'ERROR' ? IssueSeverity.Error
+            : p.severity === 'WARNING' ? IssueSeverity.Warning
+            : IssueSeverity.Information,
+        message: p.message,
+        ruleId: p.ruleId ?? undefined,
+        line: p.line || 1,
+        column: p.column || 0,
+        source: 'local-schematron' as const,
+    }));
+}
 
-    let output: string;
-    let traceEntries: TraceEntry[] = [];
+export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult> {
+    // Step 1: Write xmlContent to a temp file
+    const tempResult = writeTempFile(opts.xmlContent, '.xml');
+    const sourceFile = tempResult.filePath;
 
-    if (enableTracing) {
-        // Step 1 (traced): Run instrumented transform
-        progress('Running instrumented XSLT transformation...');
-        const traced = await runInstrumentedTransform(sourceXml, xsltStylesheet, extensionPath);
-        output = traced.cleanOutput;
-        traceEntries = traced.traceEntries;
-    } else {
-        // Step 1: Try xsltproc, fallback to bundled Saxon
-        progress('Running XSLT transformation...');
-        const xsltprocAvailable = await checkToolAvailable('xsltproc');
+    try {
+        // Step 2: Check cancellation
+        if (opts.cancellationToken?.isCancellationRequested) {
+            throw new Error('Transform cancelled');
+        }
 
-        if (xsltprocAvailable) {
-            try {
-                const result = await execAsync('xsltproc', [xsltStylesheet, sourceXml]);
-                output = result.stdout;
-            } catch (error: any) {
-                if (error.stdout) {
-                    output = error.stdout;
-                } else {
-                    throw new Error(`XSLT transformation failed: ${error.message}`);
+        // Step 3: Run Saxon transform
+        opts.onProgress?.('Running XSLT transform...', 0);
+        opts.outputChannel?.appendLine(`${ts()} [Saxon] start: xslt=${opts.xsltPath}`);
+        const saxonResult = await runSaxonTransform({
+            extensionPath: opts.extensionPath,
+            sourceFile: sourceFile,
+            xsltFile: opts.xsltPath,
+            parameters: opts.parameters,
+            enableTracing: opts.config.transform.enableTracing,
+        });
+        opts.outputChannel?.appendLine(`${ts()} [Saxon] done — output ${saxonResult.stdout.length} chars`);
+
+        // Step 4: Detect output language
+        const trimmed = saxonResult.stdout.trimStart();
+        let outputLanguage: string;
+        if (/^<html/i.test(trimmed) || /^<!DOCTYPE html/i.test(trimmed)) {
+            outputLanguage = 'html';
+        } else if (trimmed.startsWith('<?xml') || trimmed.startsWith('<')) {
+            outputLanguage = 'xml';
+        } else {
+            outputLanguage = 'text';
+        }
+
+        // Step 5: Parse Saxon trace
+        const traceMap = parseSaxonTrace(saxonResult.traceXml, opts.xsltPath);
+
+        // Step 5b: Surface transform output immediately, before validation starts
+        await opts.onTransformComplete?.(saxonResult.stdout, outputLanguage, traceMap);
+
+        // Step 6: Check cancellation
+        if (opts.cancellationToken?.isCancellationRequested) {
+            throw new Error('Transform cancelled');
+        }
+
+        // Step 7: Detect UBL doc type
+        const documentInfo = detectUblDocumentFromContent(saxonResult.stdout, opts.artifactsPath);
+
+        let xsdIssues: ValidationIssue[] = [];
+        let schemIssues: ValidationIssue[] = [];
+        let helgerIssues: ValidationIssue[] = [];
+        let detectedProfile: string | undefined = undefined;
+
+        // Step 7b: Surface "not recognised" as an info issue when auto-validate is on
+        if (documentInfo === null && opts.config.validation.enableAutoValidate) {
+            xsdIssues = [{
+                severity: IssueSeverity.Information,
+                message: 'Not a recognized UBL document — validation skipped.',
+                source: 'local-xsd',
+                line: 1,
+                column: 0,
+            }];
+        }
+
+        // Step 8: Validation (only if UBL and auto-validate enabled)
+        if (documentInfo !== null && opts.config.validation.enableAutoValidate) {
+            const rulesets: SchematronRuleset[] = [];
+            if (opts.config.validation.enableSchematronEN16931) {
+                rulesets.push(SchematronRuleset.EN16931);
+            }
+            if (opts.config.validation.enableSchematronPeppol) {
+                rulesets.push(SchematronRuleset.Peppol);
+            }
+
+            if (rulesets.length > 0) {
+                // Phase 8+: phive handles both XSD and Schematron in a single pass.
+                // Uses bundled lib/phive-jars/ by default; globalStorage jars if an update was installed.
+                const phiveJarsDir = getActiveJarsDir(opts.extensionPath, opts.globalStorageFsPath);
+
+                const phiveTmp = writeTempFile(saxonResult.stdout, '.xml');
+                try {
+                    opts.onProgress?.('Validating with phive...', 40);
+                    opts.outputChannel?.appendLine(`${ts()} [Phive] start`);
+                    const phiveOut = await runPhiveRunner({
+                        extensionPath: opts.extensionPath,
+                        xmlFilePath: phiveTmp.filePath,
+                        phiveJarsDir,
+                    });
+                    opts.outputChannel?.appendLine(
+                        `${ts()} [Phive] done — dddDetected=${phiveOut.dddDetected} issues=${phiveOut.issues.length} profile=${phiveOut.profile}`
+                    );
+                    if (phiveOut.dddDetected && !phiveOut.error) {
+                        detectedProfile = phiveOut.profile ?? undefined;
+                        schemIssues = mapPhiveIssues(phiveOut.issues);
+                    } else if (phiveOut.error) {
+                        schemIssues = [{
+                            severity: IssueSeverity.Error,
+                            message: `Phive validation error: ${phiveOut.error}`,
+                            source: 'local-schematron',
+                            ruleId: undefined,
+                            line: 1,
+                            column: 0,
+                        }];
+                    }
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    opts.outputChannel?.appendLine(`${ts()} [Phive] error: ${msg}`);
+                } finally {
+                    phiveTmp.cleanup();
                 }
             }
-        } else {
-            // Fallback to bundled Saxon
-            output = await runSaxonTransform(extensionPath, sourceXml, xsltStylesheet);
         }
-    }
 
-    // Step 2: Detect if output is UBL
-    progress('Detecting document type...');
-    const docInfo = detectUblDocumentFromContent(output);
+        // Step 9: Helger validation (only if UBL and Helger enabled)
+        if (documentInfo !== null && opts.config.validation.enableHelger) {
+            try {
+                opts.onProgress?.('Validating against Helger...', 20);
+                opts.outputChannel?.appendLine(`${ts()} [Helger] start`);
+                helgerIssues = await validateHelger(saxonResult.stdout, documentInfo, opts.config, detectedProfile);
+                opts.outputChannel?.appendLine(`${ts()} [Helger] done — issues=${helgerIssues.length}`);
+            } catch (err) {
+                const message = err instanceof Error ? err.message : String(err);
+                opts.outputChannel?.appendLine(`${ts()} [Helger] error: ${message}`);
+            }
+        }
 
-    if (!docInfo) {
-        // Not UBL - return output without validation
+        // Step 10: Return result
         return {
-            output,
-            isUbl: false,
-            documentInfo: null,
-            validationResult: null,
+            output: saxonResult.stdout,
+            outputLanguage,
+            isUbl: documentInfo !== null,
+            documentInfo,
+            issues: [...xsdIssues, ...schemIssues, ...helgerIssues],
+            traceMap,
+            detectedProfile,
         };
+    } finally {
+        tempResult.cleanup();
     }
-
-    // Step 3: Output is UBL - run validation
-    const allIssues: ValidationIssue[] = [];
-    const validationResult: ValidationResult = {
-        issues: [],
-        documentInfo: docInfo,
-        xsdPassed: true,
-        en16931Passed: null,
-        peppolPassed: null,
-    };
-
-    // XSD validation
-    if (validationScope === 'full' || validationScope === 'xsd-only') {
-        progress('Running XSD validation...');
-        try {
-            const xsdIssues = await validateXsdFromContent(output, docInfo, artifactsPath, extensionPath);
-            allIssues.push(...xsdIssues);
-            validationResult.xsdPassed = xsdIssues.length === 0;
-        } catch (error: any) {
-            vscode.window.showErrorMessage(`XSD validation error: ${error.message}`);
-            validationResult.xsdPassed = false;
-        }
-    }
-
-    // EN16931 business rules (Invoice and CreditNote only)
-    if ((validationScope === 'full' || validationScope === 'business-rules-only') && docInfo.isInvoiceOrCreditNote) {
-        progress('Checking EN16931 business rules...');
-        try {
-            const en16931Issues = await validateSchematronFromContent(output, 'en16931', artifactsPath, extensionPath);
-            allIssues.push(...en16931Issues);
-            validationResult.en16931Passed = en16931Issues.filter(
-                i => i.severity === vscode.DiagnosticSeverity.Error
-            ).length === 0;
-        } catch (error: any) {
-            vscode.window.showErrorMessage(`EN16931 validation error: ${error.message}`);
-            validationResult.en16931Passed = false;
-        }
-    }
-
-    // Peppol BIS 3.0 rules (Invoice and CreditNote only)
-    if ((validationScope === 'full' || validationScope === 'business-rules-only') && docInfo.isInvoiceOrCreditNote) {
-        progress('Checking Peppol BIS 3.0 rules...');
-        try {
-            const peppolIssues = await validateSchematronFromContent(output, 'peppol', artifactsPath, extensionPath);
-            allIssues.push(...peppolIssues);
-            validationResult.peppolPassed = peppolIssues.filter(
-                i => i.severity === vscode.DiagnosticSeverity.Error
-            ).length === 0;
-        } catch (error: any) {
-            vscode.window.showErrorMessage(`Peppol validation error: ${error.message}`);
-            validationResult.peppolPassed = false;
-        }
-    }
-
-    validationResult.issues = allIssues;
-
-    const tracedIssues = enableTracing
-        ? mapIssuesToXsltSource(allIssues, traceEntries)
-        : undefined;
-
-    return {
-        output,
-        isUbl: true,
-        documentInfo: docInfo,
-        validationResult,
-        tracedIssues,
-        traceEntries: enableTracing ? traceEntries : undefined,
-    };
 }
+
+/** Back-compat alias used by fixAgent.ts */
+export const transformAndValidate = runPipeline;

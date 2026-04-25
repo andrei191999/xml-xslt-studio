@@ -77,8 +77,18 @@ export function instrumentXslt(xsltPath: string): string {
 export async function runInstrumentedTransform(
     sourceXml: string,
     xsltPath: string,
+    enableTracing: boolean,
     extensionPath?: string
 ): Promise<{ cleanOutput: string; traceEntries: TraceEntry[] }> {
+    if (!enableTracing) {
+        return { cleanOutput: '', traceEntries: [] };
+    }
+
+    const xsltContent = fs.readFileSync(xsltPath, 'utf8');
+    if (/xsl:output[^>]*method=["']text["']/i.test(xsltContent)) {
+        return { cleanOutput: '', traceEntries: [] };
+    }
+
     const instrumented = instrumentXslt(xsltPath);
     const tmp = writeTempFile(instrumented, '.xsl');
 
@@ -100,7 +110,8 @@ export async function runInstrumentedTransform(
             }
         } else if (extensionPath) {
             // Fallback to bundled Saxon
-            rawOutput = await runSaxonTransform(extensionPath, sourceXml, tmp.filePath);
+            const saxonResult = await runSaxonTransform({ extensionPath, sourceFile: sourceXml, xsltFile: tmp.filePath, enableTracing: false });
+            rawOutput = saxonResult.stdout;
         } else {
             throw new Error(
                 '"xsltproc" is not installed and no bundled Saxon available. ' +

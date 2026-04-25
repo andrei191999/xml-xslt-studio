@@ -1,7 +1,4 @@
-import * as vscode from 'vscode';
-import { TracedIssue } from '../tracing/errorTraceMapper';
-
-export type AiProvider = 'anthropic' | 'openai' | 'gemini' | 'groq';
+export type AiProvider = 'anthropic' | 'vertex' | 'openai' | 'gemini' | 'groq';
 
 export interface AiConfig {
     provider: AiProvider;
@@ -38,9 +35,4 @@ export interface FixAttempt {
     proposal: FixProposal;
     succeeded: boolean;
     newErrors?: string[];
-}
-
-export interface FixSession {
-    issue: TracedIssue;
-    attempts: FixAttempt[];
 }

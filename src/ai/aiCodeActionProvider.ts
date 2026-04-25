@@ -1,11 +1,13 @@
 import * as vscode from 'vscode';
 
-const AI_FIX_SOURCES = new Set(['ubl-xsd', 'ubl-en16931', 'ubl-peppol']);
+const AI_FIX_SOURCES = new Set(['[Local-XSD]', '[Local-SCH]', '[Helger]']);
 
 export class AiFixCodeActionProvider implements vscode.CodeActionProvider {
     public static readonly providedCodeActionKinds = [
         vscode.CodeActionKind.QuickFix,
     ];
+
+    public static readonly documentSelector: vscode.DocumentSelector = [{ language: 'xml' }];
 
     provideCodeActions(
         _document: vscode.TextDocument,
@@ -29,8 +31,8 @@ export class AiFixCodeActionProvider implements vscode.CodeActionProvider {
                 vscode.CodeActionKind.QuickFix
             );
             action.command = {
-                command: 'xml-xslt-studio.aiFixSingle',
-                title: 'Fix with AI',
+                command: 'xmlXslt.fixThisError',
+                title: 'AI: Fix this error',
                 arguments: [diagnostic],
             };
             action.diagnostics = [diagnostic];
