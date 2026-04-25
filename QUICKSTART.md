@@ -4,7 +4,7 @@
 
 1. **Open the project in VS Code**
    ```bash
-   cd xslt-transformer-vscode
+   cd xml-xslt-studio
    code .
    ```
 
@@ -59,7 +59,7 @@ Once you're happy with the extension:
 
 1. Shows file picker for XML input
 2. Shows file picker for XSL/XSLT stylesheet
-3. Performs the transformation using Saxon-JS (XSLT 3.0 processor)
+3. Performs the transformation using bundled Saxon-HE 10.9 (XSLT 2.0 processor)
 4. Lets you either:
    - View the result in a new editor tab
    - Save it to a file

@@ -2,8 +2,8 @@
   "name": "xml-xslt-studio",
   "displayName": "XSLT Studio",
   "description": "Transform XML with XSLT and validate UBL 2.1 documents (XSD + EN16931 + Peppol BIS 3.0). Only requires Java — everything else is bundled.",
-  "version": "1.0.0",
-  "publisher": "am-vs-tools",
+  "version": "0.2.0",
+  "publisher": "AndreiMacovei",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -14,6 +14,10 @@
   },
   "homepage": "https://github.com/andrei191999/xml-xslt-studio#readme",
   "icon": "icon.png",
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
   "keywords": [
     "xslt",
     "xml",
@@ -26,128 +30,298 @@
     "xsd"
   ],
   "engines": {
-    "vscode": "^1.74.0"
+    "vscode": "^1.85.0"
   },
   "categories": [
     "Linters",
     "Formatters"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onLanguage:xml",
+    "onLanguage:xsl"
   ],
-  "main": "./out/extension.js",
+  "main": "./dist/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "xml-xslt-studio.transform",
-        "title": "XSLT: Transform XML",
+        "command": "xmlXslt.openPanel",
+        "title": "Open XSLT Studio Panel",
+        "category": "XSLT Studio",
+        "icon": "$(layout-panel)"
+      },
+      {
+        "command": "xmlXslt.transform",
+        "title": "Transform XML with XSLT",
+        "category": "XSLT Studio",
         "icon": "$(symbol-misc)"
       },
       {
-        "command": "xml-xslt-studio.validateUbl",
-        "title": "UBL: Validate Document",
+        "command": "xmlXslt.validateDocument",
+        "title": "Validate UBL Document",
+        "category": "XSLT Studio",
         "icon": "$(check-all)"
       },
       {
-        "command": "xml-xslt-studio.validateUblXsd",
-        "title": "UBL: Validate XSD Only"
+        "command": "xmlXslt.validateXsdOnly",
+        "title": "Validate XSD Only",
+        "category": "XSLT Studio"
       },
       {
-        "command": "xml-xslt-studio.validateUblBusinessRules",
-        "title": "UBL: Validate Business Rules Only"
+        "command": "xmlXslt.validateBusinessRulesOnly",
+        "title": "Validate Business Rules Only",
+        "category": "XSLT Studio"
       },
       {
-        "command": "xml-xslt-studio.aiFixAll",
-        "title": "UBL: Fix All Errors with AI"
+        "command": "xmlXslt.runScenario",
+        "title": "Run Scenario",
+        "category": "XSLT Studio"
       },
       {
-        "command": "xml-xslt-studio.aiSetApiKey",
-        "title": "UBL: Set AI API Key"
+        "command": "xmlXslt.saveScenario",
+        "title": "Save Current Transform as Scenario",
+        "category": "XSLT Studio"
+      },
+      {
+        "command": "xmlXslt.manageScenarios",
+        "title": "Manage Scenarios",
+        "category": "XSLT Studio"
+      },
+      {
+        "command": "xmlXslt.toggleWatch",
+        "title": "Toggle Watch Mode",
+        "category": "XSLT Studio",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "xmlXslt.fixAllErrors",
+        "title": "Fix All Errors with AI",
+        "category": "XSLT Studio"
+      },
+      {
+        "command": "xmlXslt.setApiKey",
+        "title": "Set AI API Key",
+        "category": "XSLT Studio"
+      },
+      {
+        "command": "xmlXslt.fixThisError",
+        "title": "Fix This Error (AI)"
+      },
+      {
+        "command": "xmlXslt.checkPhiveUpdate",
+        "title": "Check Curated PHIVE Feed for Updates",
+        "category": "XSLT Studio"
+      },
+      {
+        "command": "xmlXslt.rollbackPhiveUpdate",
+        "title": "Rollback PHIVE Runtime Stack",
+        "category": "XSLT Studio"
       }
     ],
     "menus": {
       "editor/title": [
         {
-          "command": "xml-xslt-studio.transform",
-          "group": "navigation"
+          "command": "xmlXslt.openPanel",
+          "group": "navigation",
+          "when": "resourceExtname == .xml || resourceExtname == .xsl || resourceExtname == .xslt"
         },
         {
-          "command": "xml-xslt-studio.validateUbl",
-          "group": "navigation"
-        }
-      ],
-      "commandPalette": [
-        {
-          "command": "xml-xslt-studio.transform"
+          "command": "xmlXslt.transform",
+          "group": "navigation",
+          "when": "resourceExtname == .xml || resourceExtname == .xsl || resourceExtname == .xslt"
         },
         {
-          "command": "xml-xslt-studio.validateUbl"
-        },
-        {
-          "command": "xml-xslt-studio.validateUblXsd"
-        },
-        {
-          "command": "xml-xslt-studio.validateUblBusinessRules"
-        },
-        {
-          "command": "xml-xslt-studio.aiFixAll"
-        },
-        {
-          "command": "xml-xslt-studio.aiSetApiKey"
+          "command": "xmlXslt.validateDocument",
+          "group": "navigation",
+          "when": "resourceExtname == .xml || resourceExtname == .xsl || resourceExtname == .xslt"
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "xmlXslt.transform",
+        "key": "ctrl+shift+t",
+        "mac": "cmd+shift+t",
+        "when": "editorLangId == xml || editorLangId == xsl"
+      },
+      {
+        "command": "xmlXslt.validateDocument",
+        "key": "ctrl+shift+v",
+        "mac": "cmd+shift+v",
+        "when": "editorLangId == xml || editorLangId == xsl"
+      }
+    ],
     "configuration": {
-      "title": "UBL Validator AI",
+      "title": "XSLT Studio",
       "properties": {
-        "ublValidator.ai.provider": {
+        "xmlXslt.transform.outputDestination": {
           "type": "string",
           "enum": [
-            "gemini",
-            "groq",
-            "anthropic",
-            "openai"
+            "newTab",
+            "saveFile"
           ],
-          "default": "gemini",
-          "description": "AI provider to use for fix suggestions. Gemini and Groq are free, Anthropic and OpenAI are paid."
+          "default": "newTab",
+          "description": "Where to write transform output: open in a new tab or save to a file."
         },
-        "ublValidator.ai.model": {
+        "xmlXslt.transform.defaultOutputExtension": {
+          "type": "string",
+          "default": "xml",
+          "description": "Default file extension for saved output files (used when outputDestination is saveFile)."
+        },
+        "xmlXslt.transform.enableTracing": {
+          "type": "boolean",
+          "default": true,
+          "description": "Capture Saxon execution trace for Related Information links in diagnostics."
+        },
+        "xmlXslt.validation.enableAutoValidate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically run XSD + Schematron validation after each transform."
+        },
+        "xmlXslt.validation.enableHelger": {
+          "type": "boolean",
+          "default": false,
+          "description": "Send the document to the Helger Peppol validation service after each transform."
+        },
+        "xmlXslt.validation.helgerEndpoint": {
+          "type": "string",
+          "default": "https://peppol.helger.com/wsdvs",
+          "description": "Helger Document Validation Service SOAP endpoint URL."
+        },
+        "xmlXslt.validation.helgerVesidVersion": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "latest",
+                "previous"
+              ]
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": "latest",
+          "markdownDescription": "Peppol BIS 3.0 version for Helger validation. `latest` → 2025.11.0; `previous` → 2025.5.0; or enter an explicit version string e.g. `2025.11.0`."
+        },
+        "xmlXslt.validation.helgerTimeoutMs": {
+          "type": "number",
+          "default": 15000,
+          "minimum": 1000,
+          "description": "Timeout in milliseconds for the Helger SOAP request."
+        },
+        "xmlXslt.validation.helger.customVesidMappings": {
+          "type": "array",
+          "default": [],
+          "description": "Custom CustomizationID prefix → VESID mappings. Checked before the built-in table. Each entry overrides auto-detection for matching documents.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "customizationIdPrefix": {
+                "type": "string",
+                "description": "CustomizationID prefix to match (startsWith)"
+              },
+              "vesid": {
+                "type": "string",
+                "description": "Full VESID string e.g. eu.peppol.bis3:invoice:2025.11.0"
+              }
+            },
+            "required": [
+              "customizationIdPrefix",
+              "vesid"
+            ]
+          }
+        },
+        "xmlXslt.validation.enableSchematronEN16931": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run EN16931 Schematron validation via phive."
+        },
+        "xmlXslt.validation.enableSchematronPeppol": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run Peppol BIS 3.0 Schematron validation via phive."
+        },
+        "xmlXslt.phive.checkForUpdates": {
+          "type": "boolean",
+          "default": true,
+          "description": "Check the curated PHIVE feed for runtime stack updates on startup. Requires internet access."
+        },
+        "xmlXslt.phive.feedUrl": {
+          "type": "string",
+          "default": "https://andrei191999.github.io/xml-xslt-studio/phive/stable.json",
+          "description": "URL of the curated PHIVE stack feed. Change only if using a custom feed."
+        },
+        "xmlXslt.phive.checkIntervalDays": {
+          "type": "number",
+          "default": 7,
+          "minimum": 1,
+          "description": "Days between automatic PHIVE feed checks. Default is 7."
+        },
+        "xmlXslt.ai.provider": {
+          "type": "string",
+          "enum": [
+            "anthropic",
+            "vertex",
+            "openai",
+            "gemini",
+            "groq"
+          ],
+          "default": "anthropic",
+          "description": "AI provider for the Fix All Errors command. Use 'vertex' for Anthropic Claude on Google Cloud Vertex AI (no API key required — uses Application Default Credentials)."
+        },
+        "xmlXslt.ai.model": {
           "type": "string",
           "default": "",
-          "description": "Model to use (leave empty for provider default: gemini-2.0-flash for Gemini, llama-3.3-70b-versatile for Groq, claude-sonnet-4-20250514 for Anthropic, gpt-4o for OpenAI)."
+          "description": "Model to use (leave empty for provider default)."
         },
-        "ublValidator.ai.maxRetries": {
+        "xmlXslt.ai.vertexProject": {
+          "type": "string",
+          "default": "",
+          "description": "GCP project ID for Vertex AI (only used when provider is 'vertex')."
+        },
+        "xmlXslt.ai.vertexRegion": {
+          "type": "string",
+          "default": "us-east5",
+          "description": "GCP region for Vertex AI (only used when provider is 'vertex')."
+        },
+        "xmlXslt.ai.maxRetries": {
           "type": "number",
           "default": 3,
           "minimum": 1,
           "maximum": 10,
-          "description": "Maximum number of retry attempts if a fix does not resolve the error."
+          "description": "Maximum fix-and-validate retry attempts."
         }
       }
-    },
-    "keybindings": [
-      {
-        "command": "xml-xslt-studio.validateUbl",
-        "key": "ctrl+shift+v",
-        "mac": "cmd+shift+v",
-        "when": "editorTextFocus"
-      }
-    ]
+    }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile:java && npm run compile",
-    "compile": "tsc -p ./",
+    "build": "node esbuild.config.js",
+    "watch": "node esbuild.config.js --watch",
+    "typecheck": "tsc --noEmit",
     "compile:java": "javac -source 8 -target 8 -d lib/classes java/XsdValidator.java",
-    "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile",
-    "lint": "eslint src --ext ts"
+    "compile:phive": "javac --release 17 -cp \"lib/phive-jars/*\" -d lib/classes java/PhiveRunner.java",
+    "phive:deps": "cd java && ./mvnw dependency:copy-dependencies -DoutputDirectory=../lib/phive-jars",
+    "phive:deps:win": "cd java && mvnw.cmd dependency:copy-dependencies -DoutputDirectory=../lib/phive-jars",
+    "phive:pilot": "node scripts/phive-pilot.js",
+    "phive:curate": "node scripts/phive-curate.js",
+    "phive:refresh": "node scripts/phive-refresh.js",
+    "test": "jest",
+    "vscode:prepublish": "npm run build"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/node": "^18.x",
-    "@types/vscode": "^1.74.0",
+    "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
+    "esbuild": "^0.28.0",
     "eslint": "^8.0.0",
+    "jest": "^30.3.0",
+    "ts-jest": "^29.4.9",
     "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@xmldom/xmldom": "^0.9.9",
+    "xpath": "^0.0.34"
   }
 }
