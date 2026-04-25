@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-04-21T20:11:28.170Z",
+  "channel": "stable",
+  "stacks": [
+    {
+      "stackId": "ddd-0.8.5_phive-12.0.3_rules-4.3.0",
+      "publishedAt": "2026-04-21T20:11:10.490Z",
+      "source": "github-release",
+      "directVersions": {
+        "ddd": "0.8.5",
+        "phive": "12.0.3",
+        "rules": "4.3.0"
+      },
+      "minimumExtensionVersion": "0.1.0",
+      "minimumJavaMajor": 17,
+      "bundle": {
+        "assetName": "phive-stack-ddd-0.8.5_phive-12.0.3_rules-4.3.0.zip",
+        "url": "https://github.com/andrei191999/xml-xslt-studio/releases/download/phive-stack-ddd-0.8.5_phive-12.0.3_rules-4.3.0/phive-stack-ddd-0.8.5_phive-12.0.3_rules-4.3.0.zip",
+        "sizeBytes": 23278040,
+        "sha256": "add639dbcc554ab4939ea37af31d8a803f0b16d67187204bd2651148506fae2e"
+      }
+    }
+  ]
+}

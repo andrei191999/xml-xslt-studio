@@ -1,132 +1,104 @@
 import * as vscode from 'vscode';
-import { ValidationIssue, ValidationResult } from './types';
-import { TracedIssue } from '../tracing/errorTraceMapper';
+import { IssueSeverity, ValidationIssue } from './types';
+import { attachRelatedInfo } from '../tracing/errorTraceMapper';
 
-// Store traced issues per URI so the AI agent can retrieve full trace data from a diagnostic
-const tracedIssueStore = new Map<string, TracedIssue[]>();
+// Source display strings used in diagnostic.source
+const SOURCE_LABEL: Record<ValidationIssue['source'], string> = {
+    'local-xsd': '[Local-XSD]',
+    'local-schematron': '[Local-SCH]',
+    'helger': '[Helger]',
+};
 
-export function storeTracedIssues(uri: vscode.Uri, issues: TracedIssue[]): void {
-    tracedIssueStore.set(uri.toString(), issues);
-}
+// Store per-URI traceMap so code action providers can retrieve it
+const traceMapStore = new Map<string, Map<number, vscode.Location>>();
 
-export function getTracedIssue(uri: vscode.Uri, diagnostic: vscode.Diagnostic): TracedIssue | undefined {
-    const issues = tracedIssueStore.get(uri.toString());
-    if (!issues) {
-        return undefined;
-    }
-    const line = diagnostic.range.start.line + 1; // Convert back to 1-indexed
-    return issues.find(i =>
-        i.line === line && i.message === diagnostic.message
-    );
-}
-
-export function getTracedIssues(uri: vscode.Uri): TracedIssue[] | undefined {
-    return tracedIssueStore.get(uri.toString());
+export function getTraceMap(uri: vscode.Uri): Map<number, vscode.Location> | undefined {
+    return traceMapStore.get(uri.toString());
 }
 
 export function reportDiagnostics(
-    collection: vscode.DiagnosticCollection,
-    uri: vscode.Uri,
-    issues: ValidationIssue[]
-): void {
-    const diagnostics: vscode.Diagnostic[] = issues.map(issue => {
-        const line = Math.max(0, issue.line - 1); // VS Code is 0-indexed
-        const range = new vscode.Range(line, issue.column, line, Number.MAX_SAFE_INTEGER);
-
-        const diagnostic = new vscode.Diagnostic(range, issue.message, issue.severity);
-        diagnostic.source = `ubl-${issue.source}`;
-        if (issue.ruleId) {
-            diagnostic.code = issue.ruleId;
-        }
-
-        return diagnostic;
-    });
-
-    collection.set(uri, diagnostics);
-}
-
-export function reportTracedDiagnostics(
-    collection: vscode.DiagnosticCollection,
+    local: vscode.DiagnosticCollection,
+    helger: vscode.DiagnosticCollection,
     outputUri: vscode.Uri,
-    tracedIssues: TracedIssue[]
+    issues: ValidationIssue[],
+    traceMap: Map<number, vscode.Location>
 ): void {
-    const diagnostics: vscode.Diagnostic[] = tracedIssues.map(issue => {
-        const line = Math.max(0, issue.line - 1);
+    // Normalize URI — untitled: is valid; fall back for unexpected schemes
+    const normalizedUri = (outputUri.scheme === 'file' || outputUri.scheme === 'untitled')
+        ? outputUri
+        : vscode.Uri.parse('xml-xslt-output://result');
+
+    // Clear both collections for this URI before writing new diagnostics
+    local.delete(normalizedUri);
+    helger.delete(normalizedUri);
+
+    // Store traceMap for later retrieval
+    traceMapStore.set(normalizedUri.toString(), traceMap);
+
+    const localDiags: vscode.Diagnostic[] = [];
+    const helgerDiags: vscode.Diagnostic[] = [];
+    const seen = new Set<string>();
+
+    for (const issue of issues) {
+        const dedupKey = `${issue.line}:${issue.ruleId ?? issue.message}`;
+        if (seen.has(dedupKey)) { continue; }
+        seen.add(dedupKey);
+
+        const line = Math.max(0, issue.line - 1);  // VS Code 0-indexed
         const range = new vscode.Range(line, issue.column, line, Number.MAX_SAFE_INTEGER);
-        const diagnostic = new vscode.Diagnostic(range, issue.message, issue.severity);
-        diagnostic.source = `ubl-${issue.source}`;
-        if (issue.ruleId) {
-            diagnostic.code = issue.ruleId;
+        // Cast directly: IssueSeverity numeric values match vscode.DiagnosticSeverity
+        const severity = issue.severity as unknown as vscode.DiagnosticSeverity;
+        const message = (issue.ruleId && !issue.message.startsWith('['))
+            ? `[${issue.ruleId}] ${issue.message}`
+            : issue.message;
+        if (!message) { continue; }
+        const diag = new vscode.Diagnostic(range, message, severity);
+        diag.source = SOURCE_LABEL[issue.source];
+        if (issue.ruleId) { diag.code = issue.ruleId; }
+        attachRelatedInfo(diag, issue.line, traceMap);
+
+        if (issue.source === 'helger') {
+            helgerDiags.push(diag);
+        } else {
+            localDiags.push(diag);
         }
+    }
 
-        // Add related information linking to the exact XSLT source line
-        if (issue.xsltSourceFile && issue.xsltSourceLine) {
-            const xsltUri = vscode.Uri.file(issue.xsltSourceFile);
-            const xsltLine = Math.max(0, issue.xsltSourceLine - 1);
-            const xsltRange = new vscode.Range(xsltLine, 0, xsltLine, Number.MAX_SAFE_INTEGER);
-            const elementInfo = issue.xsltElementName
-                ? `<${issue.xsltElementName}>`
-                : 'element';
-            diagnostic.relatedInformation = [
-                new vscode.DiagnosticRelatedInformation(
-                    new vscode.Location(xsltUri, xsltRange),
-                    `Produced by ${elementInfo} in XSLT at line ${issue.xsltSourceLine}`
-                ),
-            ];
-        }
-
-        return diagnostic;
-    });
-
-    collection.set(outputUri, diagnostics);
-
-    // Store traced issues for AI agent retrieval
-    storeTracedIssues(outputUri, tracedIssues);
+    local.set(normalizedUri, localDiags);
+    helger.set(normalizedUri, helgerDiags);
 }
 
-export function showSummaryNotification(result: ValidationResult): void {
-    const errors = result.issues.filter(
-        i => i.severity === vscode.DiagnosticSeverity.Error
-    ).length;
-    const warnings = result.issues.filter(
-        i => i.severity === vscode.DiagnosticSeverity.Warning
-    ).length;
+export function reportXsltDiagnostics(
+    xslt: vscode.DiagnosticCollection,
+    xsltPath: string,
+    issues: ValidationIssue[],
+    traceMap: Map<number, vscode.Location>
+): void {
+    const xsltUri = vscode.Uri.file(xsltPath);
+    xslt.delete(xsltUri);
 
-    if (errors === 0 && warnings === 0) {
-        vscode.window.showInformationMessage(
-            'UBL Validation passed - no errors or warnings found.'
-        );
-        return;
+    if (traceMap.size === 0) { return; }
+
+    // Deduplicate by (xsltLine, message) — multiple output issues often map to same XSLT line
+    const seen = new Set<string>();
+    const diags: vscode.Diagnostic[] = [];
+
+    for (const issue of issues) {
+        const loc = traceMap.get(issue.line);
+        if (!loc) { continue; }
+
+        const key = `${loc.range.start.line}:${issue.message}`;
+        if (seen.has(key)) { continue; }
+        seen.add(key);
+
+        const severity = issue.severity as unknown as vscode.DiagnosticSeverity;
+        const diag = new vscode.Diagnostic(loc.range, issue.message, severity);
+        diag.source = SOURCE_LABEL[issue.source] + ' (XSLT source)';
+        if (issue.ruleId) { diag.code = issue.ruleId; }
+        diags.push(diag);
     }
 
-    const parts: string[] = [];
-    if (errors > 0) {
-        parts.push(`${errors} error${errors !== 1 ? 's' : ''}`);
-    }
-    if (warnings > 0) {
-        parts.push(`${warnings} warning${warnings !== 1 ? 's' : ''}`);
-    }
-
-    const summary = `UBL Validation: ${parts.join(', ')} found.`;
-    const details: string[] = [];
-
-    if (!result.xsdPassed) {
-        details.push('XSD');
-    }
-    if (result.en16931Passed === false) {
-        details.push('EN16931');
-    }
-    if (result.peppolPassed === false) {
-        details.push('Peppol');
-    }
-
-    const failedSources = details.length > 0
-        ? ` Failed: ${details.join(', ')}.`
-        : '';
-
-    if (errors > 0) {
-        vscode.window.showErrorMessage(`${summary}${failedSources}`);
-    } else {
-        vscode.window.showWarningMessage(`${summary}${failedSources}`);
+    if (diags.length > 0) {
+        xslt.set(xsltUri, diags);
     }
 }

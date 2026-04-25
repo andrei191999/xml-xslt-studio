@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as path from 'path';
 import { UblDocumentInfo } from './types';
 
 const UBL_21_NS = 'urn:oasis:names:specification:ubl:schema:xsd:';
@@ -82,9 +83,7 @@ const UBL_DOCUMENT_TYPES: Record<string, string> = {
     'WeightStatement': 'WeightStatement-2',
 };
 
-const INVOICE_OR_CREDIT_NOTE = new Set(['Invoice', 'CreditNote']);
-
-export function detectUblDocumentFromContent(content: string): UblDocumentInfo | null {
+export function detectUblDocumentFromContent(content: string, artifactsPath: string): UblDocumentInfo | null {
     // Look at the first 2000 chars for the root element
     const head = content.substring(0, 2000);
 
@@ -102,15 +101,62 @@ export function detectUblDocumentFromContent(content: string): UblDocumentInfo |
 
     const namespace = `${UBL_21_NS}${rootElement}-2`;
 
+    // Verify the XML declares the expected UBL 2.x namespace
+    // (UBL 2.1 uses the same -2 suffix as 2.0 — there is no -2.1 namespace)
+    if (!head.includes(namespace)) {
+        return null;
+    }
+
+    const xsdPath = path.join(artifactsPath, 'xsd', 'ubl-2.1', 'maindoc', `UBL-${rootElement}-2.1.xsd`);
+
     return {
         rootElement,
         namespace,
-        documentType: xsdName,
-        isInvoiceOrCreditNote: INVOICE_OR_CREDIT_NOTE.has(rootElement),
+        docType: rootElement,
+        xsdPath,
     };
 }
 
-export function detectUblDocument(filePath: string): UblDocumentInfo | null {
+export function detectUblDocument(filePath: string, artifactsPath: string): UblDocumentInfo | null {
     const content = fs.readFileSync(filePath, 'utf8');
-    return detectUblDocumentFromContent(content);
+    return detectUblDocumentFromContent(content, artifactsPath);
+}
+
+export type DetectedProfile = 'peppol-invoice' | 'peppol-creditnote' | 'en16931';
+
+export interface CustomizationDetection {
+    profile: DetectedProfile | null;
+    source: 'xml' | 'xsl' | null;
+}
+
+/**
+ * Peek at the input XML and XSL before running a transform to pre-fill the
+ * validation profile dropdown. No transform is run.
+ * Priority: (1) cbc:CustomizationID in XML, (2) literal value scan in XSL.
+ */
+export function detectCustomizationId(xmlPath: string, xslPath: string, xslContent?: string): CustomizationDetection {
+    try {
+        const content = fs.readFileSync(xmlPath, 'utf8').substring(0, 8000);
+        const m = content.match(/<(?:[^:>\s]+:)?CustomizationID[^>]*>([^<]+)<\/(?:[^:>\s]+:)?CustomizationID>/);
+        if (m) { return { profile: mapCustId(m[1].trim()), source: 'xml' }; }
+    } catch { /* unreadable */ }
+
+    try {
+        const xsl = xslContent ?? fs.readFileSync(xslPath, 'utf8');
+        const m = xsl.match(/CustomizationID[^'"<]{0,30}['"]([^'"<]{10,})['"]/);
+        if (m) { return { profile: mapCustId(m[1].trim()), source: 'xsl' }; }
+        // Also match literal element content: <cbc:CustomizationID>value</cbc:CustomizationID>
+        const m2 = xsl.match(/<(?:[^:>]+:)?CustomizationID>([^<]{10,})<\/(?:[^:>]+:)?CustomizationID>/);
+        if (m2) { return { profile: mapCustId(m2[1].trim()), source: 'xsl' }; }
+    } catch { /* unreadable */ }
+
+    return { profile: null, source: null };
+}
+
+function mapCustId(id: string): DetectedProfile | null {
+    const l = id.toLowerCase();
+    if (l.includes('peppol') && l.includes('creditnote'))                            { return 'peppol-creditnote'; }
+    if (l.includes('peppol') && (l.includes('billing') || l.includes('invoice')))    { return 'peppol-invoice'; }
+    if (id.startsWith('urn:cen.eu:en16931'))                                          { return 'en16931'; }
+    return null;
 }

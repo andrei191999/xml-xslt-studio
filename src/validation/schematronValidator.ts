@@ -1,87 +1,59 @@
-import * as fs from 'fs';
-import * as path from 'path';
-import { ValidationIssue } from './types';
-import { parseSvrlOutput, parseSvrlOutputFromContent } from './svrlParser';
+import { IssueSeverity, ValidationIssue, SchematronRuleset } from './types';
 import { writeTempFile } from '../utils/tempFile';
-import { runSaxonTransform } from '../utils/javaRunner';
+import { runPhiveRunner, PhiveRunnerIssue } from '../utils/javaRunner';
 
-export type SchematronRuleset = 'en16931' | 'peppol';
-
-const XSLT_FILES: Record<SchematronRuleset, string> = {
-    en16931: path.join('schematron', 'en16931', 'EN16931-UBL-validation.xslt'),
-    peppol: path.join('schematron', 'peppol', 'PEPPOL-EN16931-UBL.xslt'),
-};
-
-export async function validateSchematronFromContent(
-    content: string,
-    ruleset: SchematronRuleset,
-    artifactsPath: string,
-    extensionPath: string
+export async function validateSchematron(
+    xmlContent: string,
+    rulesets: SchematronRuleset[],
+    _artifactsPath: string,
+    extensionPath: string,
+    phiveJarsDir?: string
 ): Promise<ValidationIssue[]> {
-    const tmp = writeTempFile(content, '.xml');
+    if (rulesets.length === 0 || !phiveJarsDir) {
+        return [];
+    }
+
+    const tmp = writeTempFile(xmlContent, '.xml');
     try {
-        const xsltFile = path.join(artifactsPath, XSLT_FILES[ruleset]);
-        if (!fs.existsSync(xsltFile)) {
-            throw new Error(
-                `${ruleset} XSLT not found at ${xsltFile}. ` +
-                `Please reinstall the extension or run the download-artifacts script.`
-            );
+        const result = await runPhiveRunner({ extensionPath, xmlFilePath: tmp.filePath, phiveJarsDir });
+
+        if (result.error) {
+            return [{
+                severity: IssueSeverity.Error,
+                message: `Phive validation failed: ${result.error}`,
+                source: 'local-schematron',
+                ruleId: undefined,
+                line: 1,
+                column: 0,
+            }];
         }
-        return await validateWithSaxonFromContent(xsltFile, tmp.filePath, content, ruleset, extensionPath);
+        if (!result.dddDetected) {
+            return [];
+        }
+        return mapPhiveIssues(result.issues);
+    } catch (err) {
+        return [{
+            severity: IssueSeverity.Error,
+            message: `Phive runner error: ${err instanceof Error ? err.message : String(err)}`,
+            source: 'local-schematron',
+            ruleId: undefined,
+            line: 1,
+            column: 0,
+        }];
     } finally {
         tmp.cleanup();
     }
 }
 
-export async function validateSchematron(
-    filePath: string,
-    ruleset: SchematronRuleset,
-    artifactsPath: string,
-    extensionPath: string
-): Promise<ValidationIssue[]> {
-    const xsltFile = path.join(artifactsPath, XSLT_FILES[ruleset]);
-
-    if (!fs.existsSync(xsltFile)) {
-        throw new Error(
-            `${ruleset} XSLT not found at ${xsltFile}. ` +
-            `Please reinstall the extension or run the download-artifacts script.`
-        );
-    }
-
-    return validateWithSaxon(xsltFile, filePath, ruleset, extensionPath);
-}
-
-async function validateWithSaxon(
-    xsltFile: string,
-    filePath: string,
-    ruleset: SchematronRuleset,
-    extensionPath: string
-): Promise<ValidationIssue[]> {
-    try {
-        const stdout = await runSaxonTransform(extensionPath, filePath, xsltFile);
-        return parseSvrlOutput(stdout, filePath, ruleset);
-    } catch (error: any) {
-        if (error.stdout && error.stdout.includes('svrl:')) {
-            return parseSvrlOutput(error.stdout, filePath, ruleset);
-        }
-        throw new Error(`Schematron validation (${ruleset}) with Saxon failed: ${error.message}`);
-    }
-}
-
-async function validateWithSaxonFromContent(
-    xsltFile: string,
-    tempFilePath: string,
-    sourceContent: string,
-    ruleset: SchematronRuleset,
-    extensionPath: string
-): Promise<ValidationIssue[]> {
-    try {
-        const stdout = await runSaxonTransform(extensionPath, tempFilePath, xsltFile);
-        return parseSvrlOutputFromContent(stdout, sourceContent, ruleset);
-    } catch (error: any) {
-        if (error.stdout && error.stdout.includes('svrl:')) {
-            return parseSvrlOutputFromContent(error.stdout, sourceContent, ruleset);
-        }
-        throw new Error(`Schematron validation (${ruleset}) with Saxon failed: ${error.message}`);
-    }
+function mapPhiveIssues(phiveIssues: PhiveRunnerIssue[]): ValidationIssue[] {
+    return phiveIssues.map(p => ({
+        severity: p.severity === 'ERROR' ? IssueSeverity.Error
+            : p.severity === 'WARNING' ? IssueSeverity.Warning
+            : IssueSeverity.Information,
+        message: p.message || '(no message text)',
+        ruleId: p.ruleId ?? undefined,
+        line: p.line || 1,
+        column: p.column || 0,
+        source: 'local-schematron' as const,
+    }));
 }
