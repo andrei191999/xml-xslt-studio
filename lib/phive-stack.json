@@ -13,8 +13,10 @@
     "ddd": "0.8.5",
     "phiveApi": "12.0.3",
     "phiveXml": "12.0.3",
+    "phiveResultHtml": "12.0.3",
     "phiveRulesApi": "4.3.0",
     "phiveRulesEn16931": "4.3.0",
-    "phiveRulesPeppol": "4.3.0"
+    "phiveRulesPeppol": "4.3.0",
+    "jaxbRuntime": "4.0.5"
   }
 }

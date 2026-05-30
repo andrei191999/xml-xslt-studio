@@ -38,6 +38,11 @@
       <version>${phive.version}</version>
     </dependency>
     <dependency>
+      <groupId>com.helger.phive</groupId>
+      <artifactId>phive-result-html</artifactId>
+      <version>${phive.version}</version>
+    </dependency>
+    <dependency>
       <groupId>com.helger.phive.rules</groupId>
       <artifactId>phive-rules-en16931</artifactId>
       <version>${phive.rules.version}</version>

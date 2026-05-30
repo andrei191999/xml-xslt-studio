@@ -13,6 +13,8 @@ const TRACKED_COMPONENT_PATTERNS = {
   phiveRulesApi: /^phive-rules-api-(.+)\.jar$/i,
   phiveRulesEn16931: /^phive-rules-en16931-(.+)\.jar$/i,
   phiveRulesPeppol: /^phive-rules-peppol-(.+)\.jar$/i,
+  jaxbRuntime: /^jaxb-runtime-(.+)\.jar$/i,
+  phiveResultHtml: /^phive-result-html-(.+)\.jar$/i,
 };
 
 const FIXED_ZIP_DATE = new Date('2026-01-01T00:00:00Z');
@@ -72,12 +74,16 @@ function buildStackManifestFromJars(jarsDir, directVersions, source, installedAt
   const resolvedVersions = {};
   for (const key of Object.keys(TRACKED_COMPONENT_PATTERNS)) {
     const files = matches[key];
-    if (files.length !== 1) {
+    if (files.length === 0) {
+      if (key === 'phiveResultHtml') {
+        continue;
+      }
       throw new Error(
-        files.length === 0
-          ? `Missing tracked PHIVE component jar for ${key}`
-          : `Duplicate tracked PHIVE component jars for ${key}: ${files.join(', ')}`
+        `Missing tracked PHIVE component jar for ${key}`
       );
+    }
+    if (files.length !== 1) {
+      throw new Error(`Duplicate tracked PHIVE component jars for ${key}: ${files.join(', ')}`);
     }
     const version = files[0].match(TRACKED_COMPONENT_PATTERNS[key])?.[1];
     if (!version) {

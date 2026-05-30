@@ -19,7 +19,7 @@ jest.mock('../utils/execAsync', () => ({
 }));
 
 import { spawn } from 'child_process';
-import { phiveDaemon, runPhiveRunner } from '../utils/javaRunner';
+import { PhiveRunnerHtmlError, phiveDaemon, runPhiveRunner, runPhiveRunnerHtml } from '../utils/javaRunner';
 
 const mockSpawn = spawn as jest.MockedFunction<typeof spawn>;
 
@@ -304,5 +304,96 @@ describe('runPhiveRunner — routing', () => {
         expect(result.dddDetected).toBe(true);
         const spawnArgs = mockSpawn.mock.calls[0][1] as string[];
         expect(spawnArgs).not.toContain('--daemon');
+    });
+
+    it('runPhiveRunnerHtml uses a fresh one-shot process and passes --format html', async () => {
+        const daemonProc = makeMockProcess();
+        startAndReady(daemonProc);
+
+        const htmlProc = makeMockProcess();
+        mockSpawn.mockReturnValue(htmlProc.proc);
+
+        const promise = runPhiveRunnerHtml({
+            extensionPath: '/ext',
+            xmlFilePath: '/invoice.xml',
+            phiveJarsDir: '/jars',
+        });
+        setImmediate(() => {
+            htmlProc.stdout.emit('data', Buffer.from('<html><body>report</body></html>'));
+            htmlProc.emitClose();
+        });
+
+        await expect(promise).resolves.toBe('<html><body>report</body></html>');
+        expect(daemonProc.stdinWrites).toHaveLength(0);
+        expect(mockSpawn).toHaveBeenCalledTimes(2);
+        const spawnArgs = mockSpawn.mock.calls[1][1] as string[];
+        expect(spawnArgs).not.toContain('--daemon');
+        expect(spawnArgs).toEqual(expect.arrayContaining(['--format', 'html']));
+    });
+
+    it('runPhiveRunnerHtml rejects with structured error data when exit is non-zero and stdout has a JSON error envelope', async () => {
+        const htmlProc = makeMockProcess();
+        mockSpawn.mockReturnValue(htmlProc.proc);
+
+        const promise = runPhiveRunnerHtml({
+            extensionPath: '/ext',
+            xmlFilePath: '/invoice.xml',
+            phiveJarsDir: '/jars',
+        });
+
+        setImmediate(() => {
+            htmlProc.stdout.emit('data', Buffer.from(JSON.stringify({
+                profile: null,
+                vesid: null,
+                dddDetected: false,
+                issues: [],
+                ruleResults: [],
+                error: 'DDD detection returned no VESID',
+            })));
+            htmlProc.stderr.emit('data', Buffer.from('[PhiveRunner] log line\n'));
+            htmlProc.proc.emit('close', 1);
+        });
+
+        await expect(promise).rejects.toBeInstanceOf(PhiveRunnerHtmlError);
+        await expect(promise).rejects.toMatchObject({
+            exitCode: 1,
+            stdout: JSON.stringify({
+                profile: null,
+                vesid: null,
+                dddDetected: false,
+                issues: [],
+                ruleResults: [],
+                error: 'DDD detection returned no VESID',
+            }),
+            stderr: '[PhiveRunner] log line',
+            runnerOutput: {
+                error: 'DDD detection returned no VESID',
+                dddDetected: false,
+            },
+        });
+    });
+
+    it('runPhiveRunnerHtml rejects with stdout and stderr context when stdout is empty', async () => {
+        const htmlProc = makeMockProcess();
+        mockSpawn.mockReturnValue(htmlProc.proc);
+
+        const promise = runPhiveRunnerHtml({
+            extensionPath: '/ext',
+            xmlFilePath: '/invoice.xml',
+            phiveJarsDir: '/jars',
+        });
+
+        setImmediate(() => {
+            htmlProc.stdout.emit('data', Buffer.from('\n  \n'));
+            htmlProc.stderr.emit('data', Buffer.from('[PhiveRunner] html mode produced no body\n'));
+            htmlProc.emitClose();
+        });
+
+        await expect(promise).rejects.toBeInstanceOf(PhiveRunnerHtmlError);
+        await expect(promise).rejects.toMatchObject({
+            exitCode: 0,
+            stdout: '\n  \n',
+            stderr: '[PhiveRunner] html mode produced no body',
+        });
     });
 });

@@ -114,6 +114,7 @@ function writeTrackedJars(dir: string, versions: { ddd: string; phive: string; r
         `phive-rules-api-${versions.rules}.jar`,
         `phive-rules-en16931-${versions.rules}.jar`,
         `phive-rules-peppol-${versions.rules}.jar`,
+        'jaxb-runtime-4.0.5.jar',
     ]) {
         fs.writeFileSync(path.join(dir, jarName), '');
     }
@@ -303,6 +304,7 @@ function createBundleZip(
         { name: `phive-rules-api-${versions.rules}.jar`, data: '' },
         { name: `phive-rules-en16931-${versions.rules}.jar`, data: '' },
         { name: `phive-rules-peppol-${versions.rules}.jar`, data: '' },
+        { name: 'jaxb-runtime-4.0.5.jar', data: '' },
         { name: 'manifest.json', data: JSON.stringify(manifest, null, 2) },
     ];
     entryMutator?.(entries);
@@ -327,6 +329,7 @@ function buildBundleManifest(versions: { ddd: string; phive: string; rules: stri
             phiveRulesApi: versions.rules,
             phiveRulesEn16931: versions.rules,
             phiveRulesPeppol: versions.rules,
+            jaxbRuntime: '4.0.5',
         },
     };
 }

@@ -12,6 +12,7 @@ import {
     getPhiveStackStatus,
     readPhiveState,
     rollbackPhiveStack,
+    verifyStackJars,
     writePhiveState,
     writeStackManifestFile,
 } from '../validation/phiveStackRuntime';
@@ -24,7 +25,11 @@ const bundledVersions = { ddd: '0.8.5', phive: '12.0.3', rules: '4.3.0' };
 const updatedBundledVersions = { ddd: '0.8.6', phive: '12.0.4', rules: '4.3.1' };
 const installedVersions = { ddd: '0.8.7', phive: '12.0.5', rules: '4.3.2' };
 
-function writeTrackedJars(dir: string, versions: { ddd: string; phive: string; rules: string }): void {
+function writeTrackedJars(
+    dir: string,
+    versions: { ddd: string; phive: string; rules: string },
+    options: { resultHtmlVersions?: string[] } = {},
+): void {
     fs.mkdirSync(dir, { recursive: true });
     const jarNames = [
         `ddd-${versions.ddd}.jar`,
@@ -33,9 +38,13 @@ function writeTrackedJars(dir: string, versions: { ddd: string; phive: string; r
         `phive-rules-api-${versions.rules}.jar`,
         `phive-rules-en16931-${versions.rules}.jar`,
         `phive-rules-peppol-${versions.rules}.jar`,
+        'jaxb-runtime-4.0.5.jar',
     ];
     for (const jarName of jarNames) {
         fs.writeFileSync(path.join(dir, jarName), '');
+    }
+    for (const resultHtmlVersion of options.resultHtmlVersions ?? []) {
+        fs.writeFileSync(path.join(dir, `phive-result-html-${resultHtmlVersion}.jar`), '');
     }
 }
 
@@ -63,7 +72,122 @@ describe('phiveStackRuntime', () => {
 
         expect(manifest.stackId).toBe(createStackId(bundledVersions));
         expect(manifest.resolvedVersions.phiveRulesPeppol).toBe('4.3.0');
+        expect(manifest.resolvedVersions.jaxbRuntime).toBe('4.0.5');
         expect(manifest.primaryRulesVersion).toBe('4.3.0');
+    });
+
+    it('builds a manifest with optional phive-result-html when present', () => {
+        const root = makeTempDir();
+        const jarsDir = path.join(root, 'jars');
+        writeTrackedJars(jarsDir, bundledVersions, { resultHtmlVersions: [bundledVersions.phive] });
+
+        const manifest = buildStackManifestFromJars(jarsDir, bundledVersions, 'github-release');
+
+        expect(manifest.resolvedVersions.phiveResultHtml).toBe('12.0.3');
+    });
+
+    it('verifies a legacy manifest without phive-result-html', () => {
+        const root = makeTempDir();
+        const jarsDir = path.join(root, 'jars');
+        writeTrackedJars(jarsDir, bundledVersions);
+        const manifest = buildStackManifestFromJars(jarsDir, bundledVersions, 'bundled');
+
+        expect(() => verifyStackJars(jarsDir, manifest)).not.toThrow();
+    });
+
+    it('verifies a legacy manifest when an undeclared phive-result-html jar is present', () => {
+        const root = makeTempDir();
+        const jarsDir = path.join(root, 'jars');
+        writeTrackedJars(jarsDir, bundledVersions);
+        const manifest = buildStackManifestFromJars(jarsDir, bundledVersions, 'bundled');
+
+        delete manifest.resolvedVersions.phiveResultHtml;
+        fs.writeFileSync(path.join(jarsDir, `phive-result-html-${bundledVersions.phive}.jar`), '');
+
+        expect(() => verifyStackJars(jarsDir, manifest)).not.toThrow();
+    });
+
+    it('rejects an undeclared phive-result-html jar that does not match the phive version', () => {
+        const root = makeTempDir();
+        const jarsDir = path.join(root, 'jars');
+        writeTrackedJars(jarsDir, bundledVersions);
+        const manifest = buildStackManifestFromJars(jarsDir, bundledVersions, 'bundled');
+
+        delete manifest.resolvedVersions.phiveResultHtml;
+        fs.writeFileSync(path.join(jarsDir, 'phive-result-html-12.0.4.jar'), '');
+
+        expect(() => verifyStackJars(jarsDir, manifest)).toThrow(
+            'has undeclared phiveResultHtml 12.0.4; expected 12.0.3',
+        );
+    });
+
+    it('requires jaxb-runtime because DDD needs it at runtime', () => {
+        const root = makeTempDir();
+        const jarsDir = path.join(root, 'jars');
+        writeTrackedJars(jarsDir, bundledVersions);
+        const manifest = buildStackManifestFromJars(jarsDir, bundledVersions, 'bundled');
+        fs.rmSync(path.join(jarsDir, 'jaxb-runtime-4.0.5.jar'));
+
+        expect(() => verifyStackJars(jarsDir, manifest)).toThrow(
+            'Active PHIVE stack is missing jaxbRuntime',
+        );
+    });
+
+    it('verifies the bundled manifest against the local bundled jars', () => {
+        const extensionPath = path.resolve(__dirname, '..', '..');
+        const manifestPath = path.join(extensionPath, 'lib', 'phive-stack.json');
+        const jarsDir = path.join(extensionPath, 'lib', 'phive-jars');
+
+        expect(fs.existsSync(manifestPath)).toBe(true);
+        expect(fs.existsSync(jarsDir)).toBe(true);
+        expect(() => getActiveJarsDir(extensionPath)).not.toThrow();
+    });
+
+    it('requires phive-result-html when the manifest declares it', () => {
+        const root = makeTempDir();
+        const jarsDir = path.join(root, 'jars');
+        writeTrackedJars(jarsDir, bundledVersions, { resultHtmlVersions: [bundledVersions.phive] });
+        const manifest = buildStackManifestFromJars(jarsDir, bundledVersions, 'bundled');
+        fs.rmSync(path.join(jarsDir, `phive-result-html-${bundledVersions.phive}.jar`));
+
+        expect(() => verifyStackJars(jarsDir, manifest)).toThrow(
+            'Active PHIVE stack is missing phiveResultHtml',
+        );
+    });
+
+    it('rejects a wrong-version phive-result-html jar when the manifest declares it', () => {
+        const root = makeTempDir();
+        const jarsDir = path.join(root, 'jars');
+        writeTrackedJars(jarsDir, bundledVersions, { resultHtmlVersions: [bundledVersions.phive] });
+        const manifest = buildStackManifestFromJars(jarsDir, bundledVersions, 'bundled');
+        fs.rmSync(path.join(jarsDir, `phive-result-html-${bundledVersions.phive}.jar`));
+        fs.writeFileSync(path.join(jarsDir, 'phive-result-html-12.0.4.jar'), '');
+
+        expect(() => verifyStackJars(jarsDir, manifest)).toThrow(
+            'expected phiveResultHtml 12.0.3 but found 12.0.4',
+        );
+    });
+
+    it('rejects duplicate phive-result-html jars when building a manifest', () => {
+        const root = makeTempDir();
+        const jarsDir = path.join(root, 'jars');
+        writeTrackedJars(jarsDir, bundledVersions, { resultHtmlVersions: [bundledVersions.phive, '12.0.4'] });
+
+        expect(() => buildStackManifestFromJars(jarsDir, bundledVersions, 'github-release')).toThrow(
+            'Duplicate tracked PHIVE component jars for phiveResultHtml',
+        );
+    });
+
+    it('rejects duplicate phive-result-html jars when verifying a manifest', () => {
+        const root = makeTempDir();
+        const jarsDir = path.join(root, 'jars');
+        writeTrackedJars(jarsDir, bundledVersions, { resultHtmlVersions: [bundledVersions.phive] });
+        const manifest = buildStackManifestFromJars(jarsDir, bundledVersions, 'bundled');
+        fs.writeFileSync(path.join(jarsDir, 'phive-result-html-12.0.4.jar'), '');
+
+        expect(() => verifyStackJars(jarsDir, manifest)).toThrow(
+            'Active PHIVE stack has duplicate jars for phiveResultHtml',
+        );
     });
 
     it('resolves the bundled stack as active by default', () => {

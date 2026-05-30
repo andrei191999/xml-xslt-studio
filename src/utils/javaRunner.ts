@@ -118,6 +118,7 @@ export interface PhiveRunnerOutput {
     vesid: string | null;
     dddDetected: boolean;
     issues: PhiveRunnerIssue[];
+    ruleResults: PhiveRunnerRuleResult[];
     error?: string;
 }
 
@@ -131,10 +132,45 @@ export interface PhiveRunnerIssue {
     location: string | null;
 }
 
+export interface PhiveRunnerRuleResult {
+    ruleId: string;
+    description: string;
+    status: 'passed' | 'failed' | 'skipped';
+    passed: boolean;
+    source: 'xsd' | 'schematron' | 'phive';
+}
+
 export interface PhiveRunnerOptions {
     extensionPath: string;
     xmlFilePath: string;
     phiveJarsDir: string;
+}
+
+export interface PhiveRunnerHtmlOptions extends PhiveRunnerOptions {}
+
+export class PhiveRunnerHtmlError extends Error {
+    exitCode: number | null;
+    stdout: string;
+    stderr: string;
+    runnerOutput?: PhiveRunnerOutput;
+
+    constructor(
+        message: string,
+        details: {
+            exitCode: number | null;
+            stdout: string;
+            stderr: string;
+            runnerOutput?: PhiveRunnerOutput;
+        },
+    ) {
+        super(message);
+        Object.setPrototypeOf(this, new.target.prototype);
+        this.name = 'PhiveRunnerHtmlError';
+        this.exitCode = details.exitCode;
+        this.stdout = details.stdout;
+        this.stderr = details.stderr;
+        this.runnerOutput = details.runnerOutput;
+    }
 }
 
 /**
@@ -186,6 +222,95 @@ export async function runPhiveRunner(opts: PhiveRunnerOptions): Promise<PhiveRun
                 const stderr = Buffer.concat(stderrChunks).toString('utf8');
                 reject(new Error(`PhiveRunner invalid JSON (exit ${code}): ${stderr}`));
             }
+        });
+    });
+}
+
+export async function runPhiveRunnerHtml(opts: PhiveRunnerHtmlOptions): Promise<string> {
+    await ensureJava();
+    const { extensionPath, xmlFilePath, phiveJarsDir } = opts;
+
+    const classesDir = path.join(extensionPath, 'lib', 'classes');
+    const classpath = classesDir + path.delimiter + path.join(phiveJarsDir, '*');
+
+    return new Promise<string>((resolve, reject) => {
+        let settled = false;
+        const child = spawn('java', [
+            '-cp', classpath,
+            'PhiveRunner',
+            '--xml', xmlFilePath,
+            '--jars', phiveJarsDir,
+            '--format', 'html',
+        ], { shell: false });
+
+        const stdoutChunks: Buffer[] = [];
+        const stderrChunks: Buffer[] = [];
+        const settleResolve = (html: string) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            resolve(html);
+        };
+        const settleReject = (err: PhiveRunnerHtmlError) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            reject(err);
+        };
+        const getStdout = () => Buffer.concat(stdoutChunks).toString('utf8');
+        const getStderr = () => Buffer.concat(stderrChunks).toString('utf8').trim();
+        const tryParseRunnerOutput = (stdout: string): PhiveRunnerOutput | undefined => {
+            try {
+                return JSON.parse(stdout) as PhiveRunnerOutput;
+            } catch {
+                return undefined;
+            }
+        };
+        const buildHtmlError = (
+            message: string,
+            exitCode: number | null,
+            stdout: string,
+            stderr: string,
+        ): PhiveRunnerHtmlError => new PhiveRunnerHtmlError(message, {
+            exitCode,
+            stdout,
+            stderr,
+            runnerOutput: stdout.trim() ? tryParseRunnerOutput(stdout.trim()) : undefined,
+        });
+
+        child.stdout.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
+        child.stderr.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
+        child.on('error', (err) => {
+            settleReject(buildHtmlError(`PhiveRunner HTML process error: ${err.message}`, null, getStdout(), getStderr()));
+        });
+
+        child.on('close', (code) => {
+            const stdout = getStdout();
+            const stderr = getStderr();
+
+            if (code !== 0) {
+                settleReject(buildHtmlError(
+                    `PhiveRunner HTML failed (exit ${code}): stdout=${JSON.stringify(stdout.trim())} stderr=${JSON.stringify(stderr)}`,
+                    code,
+                    stdout,
+                    stderr,
+                ));
+                return;
+            }
+
+            if (!stdout.trim()) {
+                settleReject(buildHtmlError(
+                    `PhiveRunner HTML returned empty stdout (exit ${code}): stdout=${JSON.stringify(stdout)} stderr=${JSON.stringify(stderr)}`,
+                    code,
+                    stdout,
+                    stderr,
+                ));
+                return;
+            }
+
+            settleResolve(stdout);
         });
     });
 }

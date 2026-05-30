@@ -18,7 +18,7 @@ jest.mock('../utils/tempFile', () => ({
     writeTempFile: jest.fn().mockReturnValue({ filePath: '/tmp/test.xml', cleanup: jest.fn() }),
 }));
 
-import { validateSchematron } from '../validation/schematronValidator';
+import { validateSchematron, validateSchematronWithMetadata } from '../validation/schematronValidator';
 import { runPhiveRunner } from '../utils/javaRunner';
 
 const mockRunner = runPhiveRunner as jest.MockedFunction<typeof runPhiveRunner>;
@@ -29,6 +29,7 @@ const DETECTED_OUTPUT: PhiveRunnerOutput = {
     vesid:   'eu.peppol.bis3.ubl.invoice:2025.11.0',
     dddDetected: true,
     issues: [],
+    ruleResults: [],
 };
 
 beforeEach(() => mockRunner.mockReset());
@@ -57,7 +58,7 @@ describe('validateSchematron — early-exit guards', () => {
 
 describe('validateSchematron — DDD detection', () => {
     it('returns [] when dddDetected is false and no error', async () => {
-        mockRunner.mockResolvedValue({ profile: null, vesid: null, dddDetected: false, issues: [] });
+        mockRunner.mockResolvedValue({ profile: null, vesid: null, dddDetected: false, issues: [], ruleResults: [] });
         const result = await validateSchematron('xml', RULESETS, '/art', '/ext', '/jars');
         expect(result).toEqual([]);
     });
@@ -65,6 +66,7 @@ describe('validateSchematron — DDD detection', () => {
     it('returns an error issue when result.error is set (fatal runner exit)', async () => {
         mockRunner.mockResolvedValue({
             profile: null, vesid: null, dddDetected: false, issues: [],
+            ruleResults: [],
             error: 'No VES registered for VESID: foo:bar:1.0',
         });
         const result = await validateSchematron('xml', RULESETS, '/art', '/ext', '/jars');
@@ -181,5 +183,68 @@ describe('validateSchematron — field mapping', () => {
         mockRunner.mockResolvedValue({ ...DETECTED_OUTPUT, issues: [] });
         const result = await validateSchematron('xml', RULESETS, '/art', '/ext', '/jars');
         expect(result).toEqual([]);
+    });
+
+    it('ignores additive ruleResults metadata when mapping issues', async () => {
+        mockRunner.mockResolvedValue({
+            ...singleIssue({ ruleId: 'PEPPOL-EN16931-R010', message: 'Mapped issue' }),
+            ruleResults: [
+                {
+                    ruleId: 'layer:peppol',
+                    description: 'Peppol layer',
+                    status: 'skipped',
+                    passed: false,
+                    source: 'phive',
+                },
+                {
+                    ruleId: 'PEPPOL-EN16931-R010',
+                    description: 'Mapped issue',
+                    status: 'failed',
+                    passed: false,
+                    source: 'phive',
+                },
+                {
+                    ruleId: 'layer:en16931',
+                    description: 'EN16931 layer',
+                    status: 'passed',
+                    passed: true,
+                    source: 'phive',
+                },
+            ],
+        });
+        const result = await validateSchematron('xml', RULESETS, '/art', '/ext', '/jars');
+        expect(result).toHaveLength(1);
+        expect(result[0].ruleId).toBe('PEPPOL-EN16931-R010');
+        expect(result[0].message).toBe('Mapped issue');
+    });
+
+    it('returns PHIVE ruleResults metadata for callers that render active rules', async () => {
+        const ruleResults = [
+            {
+                ruleId: 'ubl-credit-note',
+                description: 'external/schemas/ubl21/maindoc/UBL-CreditNote-2.1.xsd',
+                status: 'failed' as const,
+                passed: false,
+                source: 'phive' as const,
+            },
+            {
+                ruleId: 'cen-en16931',
+                description: 'external/schematron/openpeppol/2025.11/xslt/CEN-EN16931-UBL.xslt',
+                status: 'skipped' as const,
+                passed: false,
+                source: 'phive' as const,
+            },
+        ];
+        mockRunner.mockResolvedValue({
+            ...singleIssue({ ruleId: 'PEPPOL-EN16931-R010', message: 'Mapped issue' }),
+            profile: 'eu.peppol.bis3.ubl.creditnote:2025.11.0',
+            ruleResults,
+        });
+
+        const result = await validateSchematronWithMetadata('xml', RULESETS, '/art', '/ext', '/jars');
+
+        expect(result.issues).toHaveLength(1);
+        expect(result.ruleResults).toEqual(ruleResults);
+        expect(result.detectedProfile).toBe('eu.peppol.bis3.ubl.creditnote:2025.11.0');
     });
 });

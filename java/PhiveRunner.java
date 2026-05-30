@@ -29,7 +29,9 @@
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.InputStreamReader;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -48,6 +50,7 @@ import com.helger.ddd.model.DDDValueProviderList;
 import com.helger.diver.api.coord.DVRCoordinate;
 
 import com.helger.phive.api.execute.ValidationExecutionManager;
+import com.helger.phive.api.artefact.IValidationArtefact;
 import com.helger.phive.api.executorset.IValidationExecutorSet;
 import com.helger.phive.api.executorset.ValidationExecutorSetRegistry;
 import com.helger.phive.api.result.ValidationResult;
@@ -56,6 +59,7 @@ import com.helger.phive.api.validity.IValidityDeterminator;
 
 import com.helger.phive.xml.source.IValidationSourceXML;
 import com.helger.phive.xml.source.ValidationSourceXML;
+import com.helger.phive.result.html.PhiveHtmlHelper;
 
 import com.helger.phive.en16931.EN16931Validation;
 import com.helger.phive.peppol.PeppolValidation;
@@ -75,6 +79,7 @@ public class PhiveRunner
     boolean bDaemon = false;
     String sXmlPath = null;
     String sJarsPath = null;
+    String sFormat = "json";
 
     for (int i = 0; i < aArgs.length; i++)
     {
@@ -84,6 +89,8 @@ public class PhiveRunner
         sXmlPath = aArgs[++i];
       else if ("--jars".equals (aArgs[i]) && i + 1 < aArgs.length)
         sJarsPath = aArgs[++i];
+      else if ("--format".equals (aArgs[i]) && i + 1 < aArgs.length)
+        sFormat = aArgs[++i];
     }
 
     if (sJarsPath != null)
@@ -119,7 +126,7 @@ public class PhiveRunner
         }
         try
         {
-          System.out.println (runValidation (aRegistry, aDDD, sFile));
+          System.out.println (renderJson (runValidation (aRegistry, aDDD, sFile)));
         }
         catch (final Exception ex)
         {
@@ -134,6 +141,13 @@ public class PhiveRunner
     if (sXmlPath == null)
     {
       printError ("Missing required argument: --xml <xmlFilePath>");
+      System.exit (1);
+    }
+
+    final boolean bHtml = "html".equalsIgnoreCase (sFormat);
+    if (!bHtml && !"json".equalsIgnoreCase (sFormat))
+    {
+      printError ("Unsupported format: " + sFormat);
       System.exit (1);
     }
 
@@ -153,7 +167,20 @@ public class PhiveRunner
         DDDSyntaxList.getDefaultSyntaxList (),
         DDDValueProviderList.getDefaultValueProviderList ()
       );
-      System.out.println (runValidation (aRegistry, aDDD, sXmlPath));
+      final ValidationRun aRun = runValidation (aRegistry, aDDD, sXmlPath);
+      if (bHtml)
+      {
+        if (!aRun.dddDetected || aRun.ves == null || aRun.results == null)
+        {
+          printError ("DDD detection returned no VESID");
+          System.exit (1);
+        }
+        System.out.println (renderHtml (aRun));
+      }
+      else
+      {
+        System.out.println (renderJson (aRun));
+      }
       System.exit (0);
     }
     catch (final Exception ex)
@@ -183,9 +210,9 @@ public class PhiveRunner
 
   /**
    * Validate a single XML file using the pre-built registry and DDD determinator.
-   * Returns the JSON result string (same schema emitted to stdout in single-shot mode).
+   * Returns the raw validation run so JSON and HTML rendering can share the same work.
    */
-  private static String runValidation (
+  private static ValidationRun runValidation (
     final ValidationExecutorSetRegistry <IValidationSourceXML> aRegistry,
     final DocumentDetailsDeterminator aDDD,
     final String sXmlPath
@@ -193,7 +220,9 @@ public class PhiveRunner
   {
     final File aXmlFile = new File (sXmlPath);
     if (!aXmlFile.isFile ())
-      return buildError ("XML file not found: " + sXmlPath);
+      throw new Exception ("XML file not found: " + sXmlPath);
+
+    final String sSourceXml = readXmlSourceText (aXmlFile);
 
     // Parse XML
     final Document aDoc = parseXml (aXmlFile);
@@ -208,23 +237,30 @@ public class PhiveRunner
     if (aDetails == null || !aDetails.hasVESID ())
     {
       System.err.println ("[PhiveRunner] DDD detection returned no VESID");
-      return "{\"profile\":null,\"vesid\":null,\"dddDetected\":false,\"issues\":[]}";
+      return new ValidationRun (null,
+                                null,
+                                false,
+                                null,
+                                null,
+                                sSourceXml,
+                                new ArrayList <> (),
+                                new ArrayList <> ());
     }
 
     final String sVESID = aDetails.getVESID ();
-    final String sProfileName = aDetails.getProfileName ();
+    final String sProfileName = sVESID;
     System.err.println ("[PhiveRunner] Detected VESID: " + sVESID
-                        + (sProfileName != null ? " (" + sProfileName + ")" : ""));
+                        + (aDetails.getProfileName () != null ? " (" + aDetails.getProfileName () + ")" : ""));
 
     // Parse VESID into DVRCoordinate
     final DVRCoordinate aCoord = DVRCoordinate.parseOrNull (sVESID);
     if (aCoord == null)
-      return buildError ("Could not parse VESID as DVRCoordinate: " + sVESID);
+      throw new Exception ("Could not parse VESID as DVRCoordinate: " + sVESID);
 
     // Look up VES in the pre-built registry
     final IValidationExecutorSet <IValidationSourceXML> aVES = aRegistry.getOfID (aCoord);
     if (aVES == null)
-      return buildError ("No validation executor set registered for VESID: " + sVESID);
+      throw new Exception ("No validation executor set registered for VESID: " + sVESID);
 
     // Execute validation
     System.err.println ("[PhiveRunner] Executing validation");
@@ -237,9 +273,20 @@ public class PhiveRunner
     // Collect issues from all validation layers
     System.err.println ("[PhiveRunner] Collecting results");
     final List <String> aIssues = new ArrayList <> ();
+    final List <String> aRuleResults = new ArrayList <> ();
     for (final ValidationResult aLayerResult : aResults)
     {
-      if (aLayerResult.getValidity ().isSkipped ())
+      final IValidationArtefact aArtefact = aLayerResult.getValidationArtefact ();
+      final String sLayerRuleId = getArtefactRuleId (aArtefact);
+      final String sLayerDescription = getArtefactDescription (aArtefact);
+      final boolean bSkipped = aLayerResult.getValidity ().isSkipped ();
+      final boolean bHasFailures = aLayerResult.getErrorList ().iterator ().hasNext ();
+      final boolean bPassed = !bSkipped && !bHasFailures;
+      final String sLayerStatus = bSkipped ? "skipped" : (bHasFailures ? "failed" : "passed");
+
+      aRuleResults.add (buildRuleResultJson (sLayerRuleId, sLayerDescription, sLayerStatus, bPassed));
+
+      if (bSkipped)
         continue;
 
       for (final IError aError : aLayerResult.getErrorList ())
@@ -270,21 +317,106 @@ public class PhiveRunner
       }
     }
 
-    // Build output JSON
+    return new ValidationRun (sProfileName,
+                              sVESID,
+                              true,
+                              aVES,
+                              aResults,
+                              sSourceXml,
+                              aIssues,
+                              aRuleResults);
+  }
+
+  private static String renderJson (final ValidationRun aRun)
+  {
     final StringBuilder aOut = new StringBuilder ();
     aOut.append ("{");
-    aOut.append ("\"profile\":").append (jsonStr (sVESID)).append (",");
-    aOut.append ("\"vesid\":").append (jsonStr (sVESID)).append (",");
-    aOut.append ("\"dddDetected\":true,");
+    aOut.append ("\"profile\":").append (jsonStrOrNull (aRun.profile)).append (",");
+    aOut.append ("\"vesid\":").append (jsonStrOrNull (aRun.vesid)).append (",");
+    aOut.append ("\"dddDetected\":").append (aRun.dddDetected ? "true" : "false").append (",");
     aOut.append ("\"issues\":[");
-    for (int i = 0; i < aIssues.size (); i++)
+    for (int i = 0; i < aRun.serializedIssues.size (); i++)
     {
       if (i > 0)
         aOut.append (",");
-      aOut.append (aIssues.get (i));
+      aOut.append (aRun.serializedIssues.get (i));
+    }
+    aOut.append ("],");
+    aOut.append ("\"ruleResults\":[");
+    for (int i = 0; i < aRun.serializedRuleResults.size (); i++)
+    {
+      if (i > 0)
+        aOut.append (",");
+      aOut.append (aRun.serializedRuleResults.get (i));
     }
     aOut.append ("]}");
     return aOut.toString ();
+  }
+
+  private static String renderHtml (final ValidationRun aRun)
+  {
+    return new PhiveHtmlHelper (Locale.ROOT)
+      .ves (aRun.ves)
+      .sourceData (aRun.sourceXml)
+      .useDefaultCSS ()
+      .createHtml (aRun.results);
+  }
+
+  private static String readXmlSourceText (final File aXmlFile) throws Exception
+  {
+    final byte [] aBytes = Files.readAllBytes (aXmlFile.toPath ());
+    return new String (aBytes, detectXmlCharset (aBytes));
+  }
+
+  private static Charset detectXmlCharset (final byte [] aBytes)
+  {
+    if (aBytes.length >= 3 &&
+        (aBytes[0] & 0xff) == 0xef &&
+        (aBytes[1] & 0xff) == 0xbb &&
+        (aBytes[2] & 0xff) == 0xbf)
+      return StandardCharsets.UTF_8;
+    if (aBytes.length >= 2 &&
+        (aBytes[0] & 0xff) == 0xfe &&
+        (aBytes[1] & 0xff) == 0xff)
+      return StandardCharsets.UTF_16BE;
+    if (aBytes.length >= 2 &&
+        (aBytes[0] & 0xff) == 0xff &&
+        (aBytes[1] & 0xff) == 0xfe)
+      return StandardCharsets.UTF_16LE;
+
+    final int nProbeLen = Math.min (aBytes.length, 256);
+    final String sProbe = new String (aBytes, 0, nProbeLen, StandardCharsets.ISO_8859_1);
+    final String sLower = sProbe.toLowerCase (Locale.ROOT);
+    final int nEncoding = sLower.indexOf ("encoding");
+    if (nEncoding >= 0)
+    {
+      final int nEquals = sLower.indexOf ('=', nEncoding);
+      if (nEquals >= 0)
+      {
+        final int nStart = nEquals + 1;
+        for (int i = nStart; i < sProbe.length (); i++)
+        {
+          final char cQuote = sProbe.charAt (i);
+          if (cQuote == '"' || cQuote == '\'')
+          {
+            final int nEnd = sProbe.indexOf (cQuote, i + 1);
+            if (nEnd > i + 1)
+            {
+              try
+              {
+                return Charset.forName (sProbe.substring (i + 1, nEnd));
+              }
+              catch (final Exception ex)
+              {
+                return StandardCharsets.UTF_8;
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+    return StandardCharsets.UTF_8;
   }
 
   // ---------------------------------------------------------------------------
@@ -365,6 +497,54 @@ public class PhiveRunner
     return null;
   }
 
+  private static String getArtefactRuleId (final IValidationArtefact aArtefact)
+  {
+    if (aArtefact == null)
+      return "validation-layer";
+    if (aArtefact.getValidationType () != null && aArtefact.getValidationType ().getID () != null)
+      return aArtefact.getValidationType ().getID ();
+    final String sRuleResourcePath = aArtefact.getRuleResourcePath ();
+    if (sRuleResourcePath != null && !sRuleResourcePath.isEmpty ())
+      return getBasename (sRuleResourcePath);
+    return "validation-layer";
+  }
+
+  private static String getArtefactDescription (final IValidationArtefact aArtefact)
+  {
+    if (aArtefact == null)
+      return "Validation layer";
+    final String sRuleResourcePath = aArtefact.getRuleResourcePath ();
+    if (sRuleResourcePath != null && !sRuleResourcePath.isEmpty ())
+      return sRuleResourcePath;
+    if (aArtefact.getValidationType () != null && aArtefact.getValidationType ().getID () != null)
+      return aArtefact.getValidationType ().getID ();
+    return "Validation layer";
+  }
+
+  private static String getBasename (final String sPath)
+  {
+    if (sPath == null || sPath.isEmpty ())
+      return "";
+    final int nSlash = Math.max (sPath.lastIndexOf ('/'), sPath.lastIndexOf ('\\'));
+    return nSlash >= 0 ? sPath.substring (nSlash + 1) : sPath;
+  }
+
+  private static String buildRuleResultJson (final String sRuleId,
+                                             final String sDescription,
+                                             final String sStatus,
+                                             final boolean bPassed)
+  {
+    final StringBuilder sb = new StringBuilder ();
+    sb.append ("{");
+    sb.append ("\"ruleId\":").append (jsonStr (sRuleId != null && !sRuleId.isEmpty () ? sRuleId : "validation-rule")).append (",");
+    sb.append ("\"description\":").append (jsonStr (sDescription != null ? sDescription : "")).append (",");
+    sb.append ("\"status\":").append (jsonStr (sStatus != null && !sStatus.isEmpty () ? sStatus : (bPassed ? "passed" : "failed"))).append (",");
+    sb.append ("\"passed\":").append (bPassed ? "true" : "false").append (",");
+    sb.append ("\"source\":\"phive\"");
+    sb.append ("}");
+    return sb.toString ();
+  }
+
   /** Emit JSON string literal, escaping special characters. Never emits null. */
   private static String jsonStr (final String s)
   {
@@ -403,7 +583,7 @@ public class PhiveRunner
   /** Build a JSON error envelope (profile=null, dddDetected=false, error set). */
   private static String buildError (final String sMessage)
   {
-    return "{\"profile\":null,\"vesid\":null,\"dddDetected\":false,\"issues\":[],\"error\":"
+    return "{\"profile\":null,\"vesid\":null,\"dddDetected\":false,\"issues\":[],\"ruleResults\":[],\"error\":"
            + jsonStr (sMessage) + "}";
   }
 
@@ -411,5 +591,36 @@ public class PhiveRunner
   private static void printError (final String sMessage)
   {
     System.out.println (buildError (sMessage));
+  }
+
+  private static final class ValidationRun
+  {
+    final String profile;
+    final String vesid;
+    final boolean dddDetected;
+    final IValidationExecutorSet <IValidationSourceXML> ves;
+    final ValidationResultList results;
+    final String sourceXml;
+    final List <String> serializedIssues;
+    final List <String> serializedRuleResults;
+
+    ValidationRun (final String sProfile,
+                   final String sVesid,
+                   final boolean bDddDetected,
+                   final IValidationExecutorSet <IValidationSourceXML> aVes,
+                   final ValidationResultList aResults,
+                   final String sSourceXml,
+                   final List <String> aSerializedIssues,
+                   final List <String> aSerializedRuleResults)
+    {
+      profile = sProfile;
+      vesid = sVesid;
+      dddDetected = bDddDetected;
+      ves = aVes;
+      results = aResults;
+      sourceXml = sSourceXml;
+      serializedIssues = aSerializedIssues;
+      serializedRuleResults = aSerializedRuleResults;
+    }
   }
 }

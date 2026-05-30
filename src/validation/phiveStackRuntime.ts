@@ -46,6 +46,8 @@ export interface PhiveStackManifest {
         phiveRulesApi: string;
         phiveRulesEn16931: string;
         phiveRulesPeppol: string;
+        jaxbRuntime: string;
+        phiveResultHtml?: string;
     };
 }
 
@@ -70,6 +72,8 @@ const TRACKED_COMPONENT_PATTERNS: Record<ResolvedComponentKey, RegExp> = {
     phiveRulesApi: /^phive-rules-api-(.+)\.jar$/i,
     phiveRulesEn16931: /^phive-rules-en16931-(.+)\.jar$/i,
     phiveRulesPeppol: /^phive-rules-peppol-(.+)\.jar$/i,
+    jaxbRuntime: /^jaxb-runtime-(.+)\.jar$/i,
+    phiveResultHtml: /^phive-result-html-(.+)\.jar$/i,
 };
 
 export function createStackId(directVersions: PhiveStackDirectVersions): string {
@@ -204,12 +208,16 @@ export function buildStackManifestFromJars(
     const resolvedVersions = {} as PhiveStackManifest['resolvedVersions'];
     for (const key of Object.keys(TRACKED_COMPONENT_PATTERNS) as ResolvedComponentKey[]) {
         const files = matches[key];
-        if (files.length !== 1) {
+        if (files.length === 0) {
+            if (key === 'phiveResultHtml') {
+                continue;
+            }
             throw new Error(
-                files.length === 0
-                    ? `Missing tracked PHIVE component jar for ${key}`
-                    : `Duplicate tracked PHIVE component jars for ${key}: ${files.join(', ')}`,
+                `Missing tracked PHIVE component jar for ${key}`,
             );
+        }
+        if (files.length !== 1) {
+            throw new Error(`Duplicate tracked PHIVE component jars for ${key}: ${files.join(', ')}`);
         }
         const version = files[0].match(TRACKED_COMPONENT_PATTERNS[key])?.[1];
         if (!version) {
@@ -233,15 +241,26 @@ export function verifyStackJars(jarsDir: string, manifest: PhiveStackManifest): 
     const matches = listTrackedJarMatches(jarsDir);
     for (const key of Object.keys(TRACKED_COMPONENT_PATTERNS) as ResolvedComponentKey[]) {
         const files = matches[key];
-        if (files.length !== 1) {
+        const expectedVersion = manifest.resolvedVersions[key];
+        if (files.length === 0) {
+            if (key === 'phiveResultHtml' && expectedVersion === undefined) {
+                continue;
+            }
             throw new Error(
-                files.length === 0
-                    ? `Active PHIVE stack is missing ${key}`
-                    : `Active PHIVE stack has duplicate jars for ${key}: ${files.join(', ')}`,
+                `Active PHIVE stack is missing ${key}`,
             );
         }
+        if (files.length !== 1) {
+            throw new Error(`Active PHIVE stack has duplicate jars for ${key}: ${files.join(', ')}`);
+        }
+        if (key === 'phiveResultHtml' && expectedVersion === undefined) {
+            const actualVersion = files[0].match(TRACKED_COMPONENT_PATTERNS[key])?.[1];
+            if (actualVersion !== manifest.directVersions.phive) {
+                throw new Error(`Active PHIVE stack ${manifest.stackId} has undeclared phiveResultHtml ${actualVersion}; expected ${manifest.directVersions.phive}`);
+            }
+            continue;
+        }
         const actualVersion = files[0].match(TRACKED_COMPONENT_PATTERNS[key])?.[1];
-        const expectedVersion = manifest.resolvedVersions[key];
         if (actualVersion !== expectedVersion) {
             throw new Error(`Active PHIVE stack ${manifest.stackId} expected ${key} ${expectedVersion} but found ${actualVersion}`);
         }
