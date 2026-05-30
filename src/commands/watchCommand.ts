@@ -9,6 +9,12 @@ import { getConfig } from '../config/settings';
 import { openOrUpdateNamedOutputDocument } from '../ui/editorPlacement';
 import { PanelManager } from '../webview/panelManager';
 import { buildIssueSummaries, countIssueSummaries } from '../webview/issueSummaries';
+import {
+    clearLastValidationExport,
+    hasPhiveHtmlExportableRuleResults,
+    setLastValidationExport,
+} from '../state/lastValidationExport';
+import { pushHistoryEntry } from '../state/validationHistory';
 
 let isWatchEnabled = false;
 let isRunning = false;
@@ -83,12 +89,38 @@ export function registerWatchListener(
                     traceMap: result.traceMap,
                     outputUri,
                 });
+                const counts = countIssueSummaries(issueSummaries);
+                const validationTimestamp = Date.now();
+                const exportAvailable = hasPhiveHtmlExportableRuleResults(result.ruleResults);
                 PanelManager.postMessage({
                     type: 'VALIDATION_RESULT',
                     issues: issueSummaries,
                     detectedProfile: result.detectedProfile,
-                    ...countIssueSummaries(issueSummaries),
+                    ruleResults: result.ruleResults,
+                    exportAvailable,
+                    ...counts,
                 });
+                if (exportAvailable) {
+                    setLastValidationExport({
+                        timestamp: validationTimestamp,
+                        xmlPath: state.xmlPath,
+                        xsltPath: state.xsltPath,
+                        detectedProfile: result.detectedProfile,
+                        validatedXmlContent: result.output,
+                    });
+                } else {
+                    clearLastValidationExport();
+                }
+                const history = await pushHistoryEntry(context, {
+                    timestamp: validationTimestamp,
+                    xmlPath: state.xmlPath,
+                    xsltPath: state.xsltPath,
+                    outputUri: outputUri.toString(),
+                    detectedProfile: result.detectedProfile,
+                    issueCount: issueSummaries.length,
+                    ...counts,
+                });
+                PanelManager.postMessage({ type: 'VALIDATION_HISTORY', history });
                 setLastTransform({ ...state, outputUri, xmlContent });
             } catch (err) {
                 console.error('[xmlXslt watch]', err);

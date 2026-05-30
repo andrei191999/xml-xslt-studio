@@ -30,6 +30,28 @@ export interface ValidationIssueSummary {
     outputUri?: string;
 }
 
+/** Serialisable summary of one PHIVE rule result row shown in the Results pane. */
+export interface ValidationRuleResultSummary {
+    ruleId: string;
+    description: string;
+    status: 'passed' | 'failed' | 'skipped';
+    passed: boolean;
+    source: 'xsd' | 'schematron' | 'phive';
+}
+
+/** Display-only validation history row shown in the Results pane. */
+export interface ValidationHistoryEntryMessage {
+    timestamp: number;
+    xmlPath: string;
+    xsltPath?: string;
+    outputUri?: string;
+    detectedProfile?: string;
+    issueCount: number;
+    errorCount: number;
+    warningCount: number;
+    infoCount: number;
+}
+
 /** One XSLT parameter with its current value and chosen automation mode. */
 export interface ParamEntry {
     name: string;
@@ -70,6 +92,14 @@ export interface ValidationResultMessage {
     issues: ValidationIssueSummary[];
     /** DDD-detected Peppol profile VESID, e.g. "eu.peppol.bis3:invoice:2025.11.0" */
     detectedProfile?: string;
+    ruleResults: ValidationRuleResultSummary[];
+    exportAvailable?: boolean;
+}
+
+/** Sent after validation runs and on panel ready so the Results pane can show recent runs. */
+export interface ValidationHistoryMessage {
+    type: 'VALIDATION_HISTORY';
+    history: ValidationHistoryEntryMessage[];
 }
 
 export interface PhiveStackSummaryMessage {
@@ -196,6 +226,7 @@ export interface ValidationConfigStateMessage {
 
 export type HostMessage =
     | ValidationResultMessage
+    | ValidationHistoryMessage
     | PhiveStatusMessage
     | ScenarioListMessage
     | ProfileListMessage
@@ -362,6 +393,11 @@ export interface ReadyMessage {
     type: 'READY';
 }
 
+/** User clicked [Export HTML Report] in the Results pane. */
+export interface ExportReportMessage {
+    type: 'EXPORT_REPORT';
+}
+
 export type WebviewMessage =
     | TransformRequestMessage
     | ValidateRequestMessage
@@ -383,4 +419,5 @@ export type WebviewMessage =
     | ScenarioDeleteRequestMessage
     | ManageProfilesRequestMessage
     | ManageScenariosRequestMessage
-    | ReadyMessage;
+    | ReadyMessage
+    | ExportReportMessage;

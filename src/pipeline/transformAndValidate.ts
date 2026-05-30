@@ -12,6 +12,7 @@ import { parseSaxonTrace } from '../tracing/saxonTracer';
 import type { UblDocumentInfo, ValidationIssue } from '../validation/types';
 import { IssueSeverity, SchematronRuleset } from '../validation/types';
 import type { XmlXsltConfig } from '../config/settings';
+import type { PhiveRunnerRuleResult } from '../utils/javaRunner';
 
 export interface PipelineOptions {
     xmlContent: string;
@@ -34,6 +35,7 @@ export interface PipelineResult {
     isUbl: boolean;
     documentInfo: UblDocumentInfo | null;
     issues: ValidationIssue[];
+    ruleResults: PhiveRunnerRuleResult[];
     traceMap: Map<number, vscode.Location>;
     detectedProfile: string | undefined; // phive DDD-detected VESID, passed to callers
 }
@@ -102,6 +104,7 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
         let xsdIssues: ValidationIssue[] = [];
         let schemIssues: ValidationIssue[] = [];
         let helgerIssues: ValidationIssue[] = [];
+        let ruleResults: PhiveRunnerRuleResult[] = [];
         let detectedProfile: string | undefined = undefined;
 
         // Step 7b: Surface "not recognised" as an info issue when auto-validate is on
@@ -142,6 +145,7 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
                     opts.outputChannel?.appendLine(
                         `${ts()} [Phive] done — dddDetected=${phiveOut.dddDetected} issues=${phiveOut.issues.length} profile=${phiveOut.profile}`
                     );
+                    ruleResults = phiveOut.ruleResults;
                     if (phiveOut.dddDetected && !phiveOut.error) {
                         detectedProfile = phiveOut.profile ?? undefined;
                         schemIssues = mapPhiveIssues(phiveOut.issues);
@@ -184,6 +188,7 @@ export async function runPipeline(opts: PipelineOptions): Promise<PipelineResult
             isUbl: documentInfo !== null,
             documentInfo,
             issues: [...xsdIssues, ...schemIssues, ...helgerIssues],
+            ruleResults,
             traceMap,
             detectedProfile,
         };

@@ -13,6 +13,12 @@ import { IssueSeverity } from '../validation/types';
 import { openOrUpdateNamedOutputDocument } from '../ui/editorPlacement';
 import { buildIssueSummaries, countIssueSummaries } from '../webview/issueSummaries';
 import { detectCustomizationId } from '../validation/documentDetector';
+import {
+    clearLastValidationExport,
+    hasPhiveHtmlExportableRuleResults,
+    setLastValidationExport,
+} from '../state/lastValidationExport';
+import { pushHistoryEntry } from '../state/validationHistory';
 
 /**
  * Scan an XSLT file for <xsl:param name="..."> declarations and prompt the
@@ -264,12 +270,37 @@ export function createTransformCommand(
                 outputUri,
             });
             const counts = countIssueSummaries(panelSums);
+            const validationTimestamp = Date.now();
+            const exportAvailable = hasPhiveHtmlExportableRuleResults(result.ruleResults);
             PanelManager.postMessage({
                 type: 'VALIDATION_RESULT',
                 issues: panelSums,
                 detectedProfile: result.detectedProfile,
+                ruleResults: result.ruleResults,
+                exportAvailable,
                 ...counts,
             });
+            if (exportAvailable) {
+                setLastValidationExport({
+                    timestamp: validationTimestamp,
+                    xmlPath,
+                    xsltPath,
+                    detectedProfile: result.detectedProfile,
+                    validatedXmlContent: result.output,
+                });
+            } else {
+                clearLastValidationExport();
+            }
+            const history = await pushHistoryEntry(context, {
+                timestamp: validationTimestamp,
+                xmlPath,
+                xsltPath,
+                outputUri: outputUri!.toString(),
+                detectedProfile: result.detectedProfile,
+                issueCount: panelSums.length,
+                ...counts,
+            });
+            PanelManager.postMessage({ type: 'VALIDATION_HISTORY', history });
             const det = detectCustomizationId(xmlPath, xsltPath, xsltContent);
             PanelManager.postMessage({ type: 'VALIDATION_PROFILE_DETECTED', profile: det.profile, source: det.source });
             PanelManager.postMessage({ type: 'SWITCH_TAB', tab: 'results' });

@@ -1,5 +1,6 @@
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as vscode from 'vscode';
 import * as child_process from 'child_process';
 
@@ -20,7 +21,7 @@ import {
 import { createWatchToggleCommand, registerWatchListener } from './commands/watchCommand';
 import { createFixAllErrorsCommand, createSetApiKeyCommand, createFixThisErrorCommand } from './commands/aiCommands';
 import { AiFixCodeActionProvider } from './ai/aiCodeActionProvider';
-import { phiveDaemon, getActiveJarsDir } from './utils/javaRunner';
+import { phiveDaemon, getActiveJarsDir, runPhiveRunnerHtml, PhiveRunnerHtmlError, type PhiveRunnerRuleResult } from './utils/javaRunner';
 import { PanelManager } from './webview/panelManager';
 import { resolveAutomation } from './validation/paramAutomation';
 import { runPipeline } from './pipeline/transformAndValidate';
@@ -30,7 +31,7 @@ import { IssueSeverity, SchematronRuleset, ValidationIssue } from './validation/
 import type { WebviewMessage, ParamEntry } from './webview/types';
 import { detectUblDocumentFromContent, detectCustomizationId } from './validation/documentDetector';
 import { validateXsd } from './validation/xsdValidator';
-import { validateSchematron } from './validation/schematronValidator';
+import { validateSchematronWithMetadata } from './validation/schematronValidator';
 import { validateHelger } from './validation/helgerValidator';
 import { ParamProfileManager } from './ui/paramProfiles';
 import { pickFile } from './ui/filePicker';
@@ -42,6 +43,15 @@ import {
 } from './ui/editorPlacement';
 import { extractParamNames } from './utils/xsltParamUtils';
 import type { PhiveStackCandidate, PhiveStackManifest } from './validation/phiveStackRuntime';
+import { getHistory, pushHistoryEntry, type HistoryEntry } from './state/validationHistory';
+import { makeReportPath } from './reports/htmlReportPath';
+import { writeTempFile } from './utils/tempFile';
+import {
+    clearLastValidationExport,
+    getLastValidationExport,
+    hasPhiveHtmlExportableRuleResults,
+    setLastValidationExport,
+} from './state/lastValidationExport';
 
 export function activate(context: vscode.ExtensionContext): void {
     // --- Shared resources ---
@@ -244,6 +254,41 @@ export function activate(context: vscode.ExtensionContext): void {
         });
     }
 
+    function postValidationHistory(entries: HistoryEntry[] = getHistory(context)): void {
+        PanelManager.postMessage({
+            type: 'VALIDATION_HISTORY',
+            history: entries,
+        });
+    }
+
+    async function recordValidationHistory(entry: HistoryEntry): Promise<void> {
+        postValidationHistory(await pushHistoryEntry(context, entry));
+    }
+
+    function buildHistoryEntry(args: {
+        timestamp: number;
+        xmlPath: string;
+        xsltPath?: string;
+        outputUri?: vscode.Uri;
+        detectedProfile?: string;
+        errorCount: number;
+        warningCount: number;
+        infoCount: number;
+        issueCount: number;
+    }): HistoryEntry {
+        return {
+            timestamp: args.timestamp,
+            xmlPath: args.xmlPath,
+            xsltPath: args.xsltPath,
+            outputUri: args.outputUri?.toString(),
+            detectedProfile: args.detectedProfile,
+            issueCount: args.issueCount,
+            errorCount: args.errorCount,
+            warningCount: args.warningCount,
+            infoCount: args.infoCount,
+        };
+    }
+
     // --- WebView Panel message handler ---
     PanelManager.onMessage(async (msg: WebviewMessage) => {
         switch (msg.type) {
@@ -335,12 +380,36 @@ export function activate(context: vscode.ExtensionContext): void {
                                 outputUri,
                             });
                             const counts = countIssueSummaries(issueSummaries);
+                            const validationTimestamp = Date.now();
+                            const exportAvailable = hasPhiveHtmlExportableRuleResults(result.ruleResults);
                             PanelManager.postMessage({
                                 type: 'VALIDATION_RESULT',
                                 issues: issueSummaries,
                                 detectedProfile: result.detectedProfile,
+                                ruleResults: result.ruleResults,
+                                exportAvailable,
                                 ...counts,
                             });
+                            if (exportAvailable) {
+                                setLastValidationExport({
+                                    timestamp: validationTimestamp,
+                                    xmlPath,
+                                    xsltPath,
+                                    detectedProfile: result.detectedProfile,
+                                    validatedXmlContent: result.output,
+                                });
+                            } else {
+                                clearLastValidationExport();
+                            }
+                            await recordValidationHistory(buildHistoryEntry({
+                                timestamp: validationTimestamp,
+                                xmlPath,
+                                xsltPath,
+                                outputUri,
+                                detectedProfile: result.detectedProfile,
+                                issueCount: issueSummaries.length,
+                                ...counts,
+                            }));
                             // Sync validation config + profile detection back to panel
                             const vcAfter = PanelManager.getValidationConfig(context);
                             PanelManager.postMessage({ type: 'VALIDATION_CONFIG_STATE', ...vcAfter });
@@ -366,7 +435,15 @@ export function activate(context: vscode.ExtensionContext): void {
                 const phiveJarsDir = getActiveJarsDir(context.extensionPath, context.globalStorageUri.fsPath);
 
                 // Helper: run XSD + Schematron + Helger on a content string, post results to panel
-                const runValidation = async (valContent: string, diagnosticUri: vscode.Uri): Promise<void> => {
+                const runValidation = async (
+                    valContent: string,
+                    diagnosticUri: vscode.Uri,
+                    snapshot: {
+                        timestamp: number;
+                        xmlPath: string;
+                        xsltPath?: string;
+                    },
+                ): Promise<void> => {
                     const docInfo = detectUblDocumentFromContent(valContent, valArtifacts);
                     if (!docInfo) {
                         PanelManager.postMessage({
@@ -374,16 +451,35 @@ export function activate(context: vscode.ExtensionContext): void {
                             errorCount: 0, warningCount: 0, infoCount: 1,
                             issues: [{ severity: 'info', message: 'Not a recognized UBL document', source: 'local-xsd', line: 1, column: 0 }],
                             detectedProfile: undefined,
+                            ruleResults: [],
+                            exportAvailable: false,
                         });
+                        clearLastValidationExport();
+                        await recordValidationHistory(buildHistoryEntry({
+                            timestamp: snapshot.timestamp,
+                            xmlPath: snapshot.xmlPath,
+                            xsltPath: snapshot.xsltPath,
+                            issueCount: 1,
+                            errorCount: 0,
+                            warningCount: 0,
+                            infoCount: 1,
+                        }));
                         return;
                     }
                     const allIssues: ValidationIssue[] = [];
+                    let ruleResults: PhiveRunnerRuleResult[] = [];
+                    let detectedProfile: string | undefined;
                     allIssues.push(...await validateXsd(valContent, docInfo, valArtifacts, context.extensionPath));
                     const rulesets: SchematronRuleset[] = [];
                     if (valConfig.validation.enableSchematronEN16931) { rulesets.push(SchematronRuleset.EN16931); }
                     if (valConfig.validation.enableSchematronPeppol)  { rulesets.push(SchematronRuleset.Peppol); }
                     if (rulesets.length > 0 && (docInfo.docType === 'Invoice' || docInfo.docType === 'CreditNote')) {
-                        try { allIssues.push(...await validateSchematron(valContent, rulesets, valArtifacts, context.extensionPath, phiveJarsDir)); } catch { /* ignore */ }
+                        try {
+                            const schematronResult = await validateSchematronWithMetadata(valContent, rulesets, valArtifacts, context.extensionPath, phiveJarsDir);
+                            allIssues.push(...schematronResult.issues);
+                            ruleResults = schematronResult.ruleResults;
+                            detectedProfile = schematronResult.detectedProfile;
+                        } catch { /* ignore */ }
                     }
                     if (panelVc2.helger) {
                         try { allIssues.push(...await validateHelger(valContent, docInfo, valConfig)); } catch { /* ignore */ }
@@ -392,12 +488,35 @@ export function activate(context: vscode.ExtensionContext): void {
                         outputUri: msg.xmlPath ? undefined : diagnosticUri,
                     });
                     const counts = countIssueSummaries(issueSummaries);
+                    const exportAvailable = hasPhiveHtmlExportableRuleResults(ruleResults);
                     PanelManager.postMessage({
                         type: 'VALIDATION_RESULT',
                         issues: issueSummaries,
-                        detectedProfile: undefined,
+                        detectedProfile,
+                        ruleResults,
+                        exportAvailable,
                         ...counts,
                     });
+                    if (exportAvailable) {
+                        setLastValidationExport({
+                            timestamp: snapshot.timestamp,
+                            xmlPath: snapshot.xmlPath,
+                            xsltPath: snapshot.xsltPath,
+                            detectedProfile,
+                            validatedXmlContent: valContent,
+                        });
+                    } else {
+                        clearLastValidationExport();
+                    }
+                    await recordValidationHistory(buildHistoryEntry({
+                        timestamp: snapshot.timestamp,
+                        xmlPath: snapshot.xmlPath,
+                        xsltPath: snapshot.xsltPath,
+                        outputUri: msg.xmlPath ? undefined : diagnosticUri,
+                        detectedProfile,
+                        issueCount: issueSummaries.length,
+                        ...counts,
+                    }));
                     reportDiagnostics(local, helger, diagnosticUri, allIssues, new Map());
                 };
 
@@ -405,9 +524,13 @@ export function activate(context: vscode.ExtensionContext): void {
                     // Validate XML file directly (no transform) — "Validate" btn with only XML selected
                     let xmlContent: string;
                     try { xmlContent = fs.readFileSync(msg.xmlPath, 'utf8'); } catch { break; }
+                    const validationTimestamp = Date.now();
                     await vscode.window.withProgress(
                         { location: vscode.ProgressLocation.Notification, title: 'Validating...' },
-                        () => runValidation(xmlContent, vscode.Uri.file(msg.xmlPath!))
+                        () => runValidation(xmlContent, vscode.Uri.file(msg.xmlPath!), {
+                            timestamp: validationTimestamp,
+                            xmlPath: msg.xmlPath!,
+                        })
                     );
                     PanelManager.postMessage({ type: 'SWITCH_TAB', tab: 'results' });
                 } else {
@@ -421,9 +544,14 @@ export function activate(context: vscode.ExtensionContext): void {
                         d => d.uri.toString() === last.outputUri!.toString()
                     );
                     if (!outputDoc) { break; }
+                    const validationTimestamp = Date.now();
                     await vscode.window.withProgress(
                         { location: vscode.ProgressLocation.Notification, title: 'Validating...' },
-                        () => runValidation(outputDoc.getText(), outputDoc.uri)
+                        () => runValidation(outputDoc.getText(), outputDoc.uri, {
+                            timestamp: validationTimestamp,
+                            xmlPath: last.xmlPath,
+                            xsltPath: last.xsltPath,
+                        })
                     );
                 }
                 break;
@@ -698,6 +826,37 @@ export function activate(context: vscode.ExtensionContext): void {
                 sendPanelInitialState();
                 break;
 
+            case 'EXPORT_REPORT': {
+                const snapshot = getLastValidationExport();
+                if (!snapshot) {
+                    vscode.window.showInformationMessage('Run a validation first, then export the HTML report.');
+                    break;
+                }
+
+                const tempXml = writeTempFile(snapshot.validatedXmlContent, '.xml');
+                try {
+                    const phiveJarsDir = getActiveJarsDir(context.extensionPath, context.globalStorageUri.fsPath);
+                    const html = await runPhiveRunnerHtml({
+                        extensionPath: context.extensionPath,
+                        xmlFilePath: tempXml.filePath,
+                        phiveJarsDir,
+                    });
+                    const reportPath = makeReportPath(os.tmpdir(), snapshot.timestamp);
+                    fs.writeFileSync(reportPath, html, 'utf8');
+                    await vscode.env.openExternal(vscode.Uri.file(reportPath));
+                } catch (error) {
+                    const runnerOutputError = error instanceof PhiveRunnerHtmlError
+                        ? error.runnerOutput?.error
+                        : undefined;
+                    const baseMessage = error instanceof Error ? error.message : String(error);
+                    const detail = runnerOutputError ? ` PHIVE error: ${runnerOutputError}` : '';
+                    vscode.window.showErrorMessage(`Could not export PHIVE HTML report: ${baseMessage}${detail}`);
+                } finally {
+                    tempXml.cleanup();
+                }
+                break;
+            }
+
             default: break;
         }
     });
@@ -776,6 +935,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }
 
         postPhiveStatus();
+        postValidationHistory();
         const wsFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         if (wsFolder) {
             try {

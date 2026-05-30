@@ -4,15 +4,17 @@ import { ProgressLocation } from 'vscode';
 
 import { detectUblDocumentFromContent } from '../validation/documentDetector';
 import { validateXsd } from '../validation/xsdValidator';
-import { validateSchematron } from '../validation/schematronValidator';
+import { validateSchematronWithMetadata } from '../validation/schematronValidator';
 import { validateHelger } from '../validation/helgerValidator';
 import { reportDiagnostics } from '../validation/diagnosticsReporter';
 import { IssueSeverity, ValidationIssue, SchematronRuleset } from '../validation/types';
 import { getConfig } from '../config/settings';
-import { getActiveJarsDir } from '../utils/javaRunner';
+import { getActiveJarsDir, type PhiveRunnerRuleResult } from '../utils/javaRunner';
 import { ts } from '../utils/execAsync';
 import { PanelManager } from '../webview/panelManager';
 import { buildIssueSummaries, countIssueSummaries } from '../webview/issueSummaries';
+import { clearLastValidationExport, hasPhiveHtmlExportableRuleResults, setLastValidationExport } from '../state/lastValidationExport';
+import { pushHistoryEntry } from '../state/validationHistory';
 
 // ---------------------------------------------------------------------------
 // createValidateDocumentCommand — full validation (XSD + Schematron + Helger)
@@ -49,6 +51,7 @@ export function createValidateDocumentCommand(
         const docInfo = detectUblDocumentFromContent(content, artifactsPath);
         if (docInfo === null) {
             vscode.window.showInformationMessage('Not a recognized UBL document — validation skipped');
+            clearLastValidationExport();
             const issue: ValidationIssue = {
                 severity: IssueSeverity.Information,
                 message: 'Not a recognized UBL document — validation skipped.',
@@ -69,6 +72,8 @@ export function createValidateDocumentCommand(
             async () => {
                 const config = getConfig();
                 const allIssues: ValidationIssue[] = [];
+                let ruleResults: PhiveRunnerRuleResult[] = [];
+                let detectedProfile: string | undefined;
                 const phiveJarsDir = getActiveJarsDir(extensionPath, context.globalStorageUri.fsPath);
 
                 // XSD — no-op in Phase 8+ (phive handles it)
@@ -97,8 +102,11 @@ export function createValidateDocumentCommand(
                     } else {
                         outputChannel.appendLine(`${ts()} [Phive] start`);
                         try {
-                            const schIssues = await validateSchematron(content, rulesets, artifactsPath, extensionPath, phiveJarsDir);
+                            const schematronResult = await validateSchematronWithMetadata(content, rulesets, artifactsPath, extensionPath, phiveJarsDir);
+                            const schIssues = schematronResult.issues;
                             allIssues.push(...schIssues);
+                            ruleResults = schematronResult.ruleResults;
+                            detectedProfile = schematronResult.detectedProfile;
                             logIssueSummary(outputChannel, `${ts()} [Phive]`, schIssues);
                         } catch (err: any) {
                             outputChannel.appendLine(`${ts()} [Phive] error: ` + (err?.message ?? String(err)));
@@ -140,12 +148,34 @@ export function createValidateDocumentCommand(
                 PanelManager.postMessage({ type: 'FILE_SELECTED', role: 'xml', fsPath: document.uri.fsPath, fileName: path.basename(document.uri.fsPath) });
                 const panelSums = buildIssueSummaries(allIssues);
                 const counts = countIssueSummaries(panelSums);
+                const validationTimestamp = Date.now();
+                const exportAvailable = hasPhiveHtmlExportableRuleResults(ruleResults);
                 PanelManager.postMessage({
                     type: 'VALIDATION_RESULT',
                     issues: panelSums,
-                    detectedProfile: undefined,
+                    detectedProfile,
+                    ruleResults,
+                    exportAvailable,
                     ...counts,
                 });
+                if (exportAvailable) {
+                    setLastValidationExport({
+                        timestamp: validationTimestamp,
+                        xmlPath: document.uri.fsPath,
+                        detectedProfile,
+                        validatedXmlContent: content,
+                    });
+                } else {
+                    clearLastValidationExport();
+                }
+                const history = await pushHistoryEntry(context, {
+                    timestamp: validationTimestamp,
+                    xmlPath: document.uri.fsPath,
+                    detectedProfile,
+                    issueCount: panelSums.length,
+                    ...counts,
+                });
+                PanelManager.postMessage({ type: 'VALIDATION_HISTORY', history });
                 PanelManager.postMessage({ type: 'SWITCH_TAB', tab: 'results' });
             },
         );
@@ -177,6 +207,7 @@ export function createValidateXsdOnlyCommand(
         const docInfo = detectUblDocumentFromContent(content, artifactsPath);
         if (docInfo === null) {
             vscode.window.showInformationMessage('Not a recognized UBL document — skipping validation');
+            clearLastValidationExport();
             local.delete(document.uri);
             helger.delete(document.uri);
             return;
@@ -205,7 +236,16 @@ export function createValidateXsdOnlyCommand(
                 PanelManager.postMessage({ type: 'FILE_SELECTED', role: 'xml', fsPath: document.uri.fsPath, fileName: path.basename(document.uri.fsPath) });
                 const panelSums = buildIssueSummaries(allIssues);
                 const counts = countIssueSummaries(panelSums);
-                PanelManager.postMessage({ type: 'VALIDATION_RESULT', issues: panelSums, detectedProfile: undefined, ...counts });
+                const validationTimestamp = Date.now();
+                PanelManager.postMessage({ type: 'VALIDATION_RESULT', issues: panelSums, detectedProfile: undefined, ruleResults: [], exportAvailable: false, ...counts });
+                clearLastValidationExport();
+                const history = await pushHistoryEntry(context, {
+                    timestamp: validationTimestamp,
+                    xmlPath: document.uri.fsPath,
+                    issueCount: panelSums.length,
+                    ...counts,
+                });
+                PanelManager.postMessage({ type: 'VALIDATION_HISTORY', history });
                 PanelManager.postMessage({ type: 'SWITCH_TAB', tab: 'results' });
             },
         );
@@ -237,6 +277,7 @@ export function createValidateBusinessRulesOnlyCommand(
         const docInfo = detectUblDocumentFromContent(content, artifactsPath);
         if (docInfo === null) {
             vscode.window.showInformationMessage('Not a recognized UBL document — skipping validation');
+            clearLastValidationExport();
             local.delete(document.uri);
             helger.delete(document.uri);
             return;
@@ -262,6 +303,8 @@ export function createValidateBusinessRulesOnlyCommand(
             { location: ProgressLocation.Notification, title: 'Validating Schematron...' },
             async () => {
                 const allIssues: ValidationIssue[] = [];
+                let ruleResults: PhiveRunnerRuleResult[] = [];
+                let detectedProfile: string | undefined;
 
                 if (docInfo.docType !== 'Invoice' && docInfo.docType !== 'CreditNote') {
                     const infoIssue: ValidationIssue = {
@@ -277,8 +320,11 @@ export function createValidateBusinessRulesOnlyCommand(
                     try {
                         const phiveJarsDir = getActiveJarsDir(extensionPath, context.globalStorageUri.fsPath);
                         outputChannel.appendLine(`${ts()} [Phive] start`);
-                        const schIssues = await validateSchematron(content, rulesets, artifactsPath, extensionPath, phiveJarsDir);
+                        const schematronResult = await validateSchematronWithMetadata(content, rulesets, artifactsPath, extensionPath, phiveJarsDir);
+                        const schIssues = schematronResult.issues;
                         allIssues.push(...schIssues);
+                        ruleResults = schematronResult.ruleResults;
+                        detectedProfile = schematronResult.detectedProfile;
                         logIssueSummary(outputChannel, `${ts()} [Phive]`, schIssues);
                     } catch (err: any) {
                         outputChannel.appendLine(`${ts()} [Phive] error: ` + (err?.message ?? String(err)));
@@ -300,7 +346,27 @@ export function createValidateBusinessRulesOnlyCommand(
                 PanelManager.postMessage({ type: 'FILE_SELECTED', role: 'xml', fsPath: document.uri.fsPath, fileName: path.basename(document.uri.fsPath) });
                 const panelSums = buildIssueSummaries(allIssues);
                 const counts = countIssueSummaries(panelSums);
-                PanelManager.postMessage({ type: 'VALIDATION_RESULT', issues: panelSums, detectedProfile: undefined, ...counts });
+                const validationTimestamp = Date.now();
+                const exportAvailable = hasPhiveHtmlExportableRuleResults(ruleResults);
+                PanelManager.postMessage({ type: 'VALIDATION_RESULT', issues: panelSums, detectedProfile, ruleResults, exportAvailable, ...counts });
+                if (exportAvailable) {
+                    setLastValidationExport({
+                        timestamp: validationTimestamp,
+                        xmlPath: document.uri.fsPath,
+                        detectedProfile,
+                        validatedXmlContent: content,
+                    });
+                } else {
+                    clearLastValidationExport();
+                }
+                const history = await pushHistoryEntry(context, {
+                    timestamp: validationTimestamp,
+                    xmlPath: document.uri.fsPath,
+                    detectedProfile,
+                    issueCount: panelSums.length,
+                    ...counts,
+                });
+                PanelManager.postMessage({ type: 'VALIDATION_HISTORY', history });
                 PanelManager.postMessage({ type: 'SWITCH_TAB', tab: 'results' });
             },
         );
