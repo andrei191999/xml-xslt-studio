@@ -17,6 +17,8 @@ export class PanelManager {
 	private static _disposables: vscode.Disposable[] = [];
 	private static _messageHandlers: ((msg: WebviewMessage) => void)[] = [];
 	private static _context: vscode.ExtensionContext | undefined;
+	private static _ready = false;
+	private static _pendingMessages: HostMessage[] = [];
 
 	/**
 	 * Create a new panel or reveal the existing one.
@@ -30,6 +32,8 @@ export class PanelManager {
 			return;
 		}
 		this._context = context;
+		this._ready = false;
+		this._pendingMessages = [];
 
 		// Create new webview panel
 		this._panel = vscode.window.createWebviewPanel(
@@ -49,8 +53,14 @@ export class PanelManager {
 		// Wire up message receiving — store disposable so _disposeAll() can clean it up
 		this._disposables.push(
 			this._panel.webview.onDidReceiveMessage((msg: WebviewMessage) => {
+				if (msg.type === 'READY') {
+					this._ready = true;
+				}
 				for (const handler of this._messageHandlers) {
 					handler(msg);
+				}
+				if (msg.type === 'READY') {
+					this._flushPendingMessages();
 				}
 			})
 		);
@@ -81,9 +91,14 @@ export class PanelManager {
 	 * @param msg Message to send
 	 */
 	static postMessage(msg: HostMessage): void {
-		if (this._panel) {
-			this._panel.webview.postMessage(msg);
+		if (!this._panel) {
+			return;
 		}
+		if (!this._ready) {
+			this._pendingMessages.push(msg);
+			return;
+		}
+		this._panel.webview.postMessage(msg);
 	}
 
 	/**
@@ -213,6 +228,10 @@ select,input[type="text"]{background:var(--vscode-input-background);color:var(--
 .btn-danger-outlined:hover{background:var(--vscode-errorForeground,#f48771);color:#1e1e1e;}
 .btn-danger-outlined:disabled,.btn-save-outlined:disabled,.btn-manage-outlined:disabled{opacity:0.35;cursor:not-allowed;}
 .summary-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;}
+.results-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
+.results-helger-toggle{display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;}
+.btn-revalidate-inline{font-size:11px;padding:3px 10px;border-radius:4px;border:1px solid var(--vscode-focusBorder,#007fd4);background:transparent;color:var(--vscode-textLink-foreground,#3794ff);}
+.btn-revalidate-inline:hover{background:var(--vscode-button-secondaryHoverBackground);color:var(--vscode-foreground);}
 .badges{display:flex;gap:6px;align-items:center;}
 .badge-span{border-radius:10px;padding:2px 8px;font-size:11px;font-weight:600;}
 #badge-errors{background:var(--vscode-inputValidation-errorBackground,#f48771);color:#fff;}
@@ -235,6 +254,41 @@ select,input[type="text"]{background:var(--vscode-input-background);color:var(--
 .issue-entry-msg{padding:2px 0 4px 20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
                  font-size:11px;color:var(--vscode-descriptionForeground);cursor:pointer;}
 .issue-entry-msg.expanded{white-space:normal;word-break:break-word;}
+.results-section{margin-top:10px;}
+.results-details{margin-top:10px;border-top:1px solid var(--vscode-panel-border);padding-top:8px;}
+.results-details summary{cursor:pointer;font-size:11px;font-weight:700;color:var(--vscode-foreground);letter-spacing:0;}
+.results-details summary:hover{color:var(--vscode-textLink-foreground,#3794ff);}
+.results-details[open] summary{margin-bottom:8px;}
+.results-actions{display:flex;justify-content:flex-start;margin:10px 0 4px;}
+.btn-export-report{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--vscode-button-background);background:var(--vscode-button-background);color:var(--vscode-button-foreground);border-radius:6px;padding:6px 12px;font-size:12px;font-weight:700;box-shadow:0 0 0 1px color-mix(in srgb,var(--vscode-focusBorder,#007fd4) 35%,transparent);}
+.btn-export-report:hover{background:var(--vscode-button-hoverBackground);border-color:var(--vscode-focusBorder,#007fd4);}
+.mini-table{width:100%;font-size:11px;}
+.mini-header,.mini-row{display:grid;gap:6px;align-items:start;}
+.mini-header{padding:0 6px 5px;font-weight:700;color:var(--vscode-descriptionForeground);border-bottom:1px solid var(--vscode-panel-border);}
+.mini-row{padding:6px;border-left:2px solid transparent;border-bottom:1px solid var(--vscode-panel-border);}
+.mini-row:hover{background:var(--vscode-list-hoverBackground);border-left-color:var(--vscode-focusBorder,#007fd4);}
+.rule-header,.rule-row{grid-template-columns:68px 70px minmax(88px,1fr) minmax(120px,1.6fr);}
+.history-header,.history-row{grid-template-columns:92px 86px minmax(150px,1fr);}
+.rule-text,.history-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.rule-text-wrap,.history-text-wrap{white-space:normal;word-break:break-word;}
+.rule-source{font-weight:700;color:var(--vscode-symbolIcon-moduleForeground,var(--vscode-textLink-foreground,#3794ff));}
+.rule-id{font-family:var(--vscode-editor-font-family,monospace);font-size:10px;color:var(--vscode-foreground);}
+.rule-description{color:var(--vscode-descriptionForeground);}
+.status-chip{display:inline-flex;align-items:center;justify-content:center;min-width:54px;border-radius:999px;padding:1px 7px;font-size:10px;font-weight:700;line-height:16px;white-space:nowrap;border:1px solid currentColor;}
+.status-pass{color:var(--vscode-testing-iconPassed,#73c991);background:color-mix(in srgb,var(--vscode-testing-iconPassed,#73c991) 14%,transparent);}
+.status-fail{color:var(--vscode-testing-iconFailed,#f48771);background:color-mix(in srgb,var(--vscode-testing-iconFailed,#f48771) 14%,transparent);}
+.status-skip{color:var(--vscode-descriptionForeground);background:var(--vscode-editorWidget-background,var(--vscode-editor-background));}
+.history-stack{display:flex;flex-direction:column;gap:2px;min-width:0;}
+.history-line{display:grid;grid-template-columns:52px minmax(0,1fr);gap:5px;min-width:0;}
+.counts-stack .history-line{grid-template-columns:64px minmax(0,1fr);gap:10px;}
+.history-label{color:var(--vscode-descriptionForeground);font-size:10px;font-weight:700;text-transform:uppercase;}
+.history-value{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--vscode-foreground);}
+.history-value-line{display:block;}
+.history-doc .history-value{white-space:normal;word-break:break-word;}
+.count-total .history-value{color:var(--vscode-foreground);font-weight:700;}
+.count-error .history-value{color:var(--vscode-testing-iconFailed,#f48771);font-weight:700;}
+.count-warning .history-value{color:var(--vscode-editorWarning-foreground,#cca700);font-weight:700;}
+.count-info .history-value{color:var(--vscode-editorInfo-foreground,#3794ff);font-weight:700;}
 .peppol-footer{flex-shrink:0;border-top:1px solid var(--vscode-panel-border);
                padding:6px 14px;display:flex;flex-direction:column;align-items:stretch;gap:6px;font-size:11px;}
 .peppol-summary{display:flex;align-items:center;gap:8px;}
@@ -371,18 +425,29 @@ select,input[type="text"]{background:var(--vscode-input-background);color:var(--
       <span class="badge-span" id="badge-warnings">\u26A0 0 Warnings</span>
       <span class="badge-span" id="badge-info">\u2139 0 Info</span>
     </div>
-    <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
-      <input type="checkbox" id="results-helger"/>
-      Helger
-    </label>
+    <div class="results-toolbar">
+      <button id="btn-revalidate" class="btn-revalidate-inline" style="display:none;">Re-validate</button>
+      <label class="results-helger-toggle">
+        <input type="checkbox" id="results-helger"/>
+        Helger
+      </label>
+    </div>
   </div>
   <div id="last-run-meta"></div>
   <div class="section-label">Issues</div>
   <div id="issue-table-container"><div class="hint" style="padding:6px;">No issues.</div></div>
   <div class="hint" style="margin-top:4px;">Click a row to jump to line in XML editor.</div>
-  <div class="btn-action-wrap" style="margin-top:12px;">
-    <button id="btn-revalidate" class="btn-action secondary" style="display:none;">Re-validate</button>
+  <div class="results-actions" id="results-actions" style="display:none;">
+    <button id="btn-export-report" class="btn-export-report" style="display:none;">Export HTML Report</button>
   </div>
+  <details class="results-details" id="rules-details" style="display:none;">
+    <summary>Active Rules</summary>
+    <div id="rules-table-container"><div class="hint" style="padding:6px;">No rule details.</div></div>
+  </details>
+  <details class="results-details" id="history-details">
+    <summary>Validation History</summary>
+    <div id="history-table-container"><div class="hint" style="padding:6px;">No validation history yet.</div></div>
+  </details>
 </div><!-- /pane-results -->
 
 <!-- Peppol footer (always visible) -->
@@ -436,6 +501,19 @@ select,input[type="text"]{background:var(--vscode-input-background);color:var(--
 			disposable.dispose();
 		}
 		this._disposables = [];
+		this._ready = false;
+		this._pendingMessages = [];
+	}
+
+	private static _flushPendingMessages(): void {
+		if (!this._panel || !this._ready || this._pendingMessages.length === 0) {
+			return;
+		}
+		const queued = this._pendingMessages;
+		this._pendingMessages = [];
+		for (const msg of queued) {
+			this._panel.webview.postMessage(msg);
+		}
 	}
 
 	/**

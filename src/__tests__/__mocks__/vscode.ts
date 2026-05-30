@@ -8,6 +8,10 @@ export class Uri {
         const match = value.match(/^([a-z-]+):(.*)$/i);
         return new Uri(match ? match[2] : value, match ? match[1] : 'file');
     }
+    static joinPath(base: Uri, ...paths: string[]) {
+        const normalized = [base.fsPath, ...paths].join('/').replace(/\\/g, '/').replace(/\/+/g, '/');
+        return new Uri(normalized, base.scheme);
+    }
     with(changes: { scheme?: string }) { return new Uri(this.fsPath, changes.scheme ?? this.scheme); }
     toString() { return `${this.scheme}:${this.fsPath}`; }
 }
@@ -35,6 +39,7 @@ export const window = {
     showTextDocument: jest.fn(),
     createOutputChannel: jest.fn(() => ({ appendLine: jest.fn(), show: jest.fn() })),
     createStatusBarItem: jest.fn(() => ({ text: '', show: jest.fn(), dispose: jest.fn() })),
+    createWebviewPanel: jest.fn(),
 };
 
 export const workspace = {
@@ -74,4 +79,8 @@ export class Range {
 export const commands = {
     registerCommand: jest.fn(() => ({ dispose: jest.fn() })),
     executeCommand: jest.fn(),
+};
+
+export const env = {
+    openExternal: jest.fn(),
 };

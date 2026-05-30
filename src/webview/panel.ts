@@ -1,5 +1,6 @@
 import type {
     HostMessage, WebviewMessage, ParamEntry, ValidationIssueSummary, ScenarioSummary, ValidationProfile,
+    ValidationRuleResultSummary, ValidationHistoryEntryMessage,
 } from './types';
 
 declare function acquireVsCodeApi(): { postMessage(msg: WebviewMessage): void };
@@ -26,11 +27,12 @@ function clearChildren(node: HTMLElement): void {
     while (node.firstChild) { node.removeChild(node.firstChild); }
 }
 
-function makeSpan(cls: string, text: string, styleAttr?: string): HTMLSpanElement {
+function makeSpan(cls: string, text: string, styleAttr?: string, titleAttr?: string): HTMLSpanElement {
     const s = document.createElement('span');
     s.className = cls;
     s.textContent = text;
     if (styleAttr) { s.setAttribute('style', styleAttr); }
+    if (titleAttr) { s.title = titleAttr; }
     return s;
 }
 
@@ -81,6 +83,48 @@ function switchTab(tab: 'transform' | 'results'): void {
     el('tab-results').classList.toggle('active', tab === 'results');
 }
 
+function nudgeElementIntoPaneView(pane: HTMLElement, element: HTMLElement): void {
+    const paneRect = pane.getBoundingClientRect();
+    const elementRect = element.getBoundingClientRect();
+    const margin = 8;
+    let delta = 0;
+
+    if (elementRect.height <= paneRect.height - (margin * 2)) {
+        if (elementRect.top < paneRect.top + margin) {
+            delta = elementRect.top - paneRect.top - margin;
+        } else if (elementRect.bottom > paneRect.bottom - margin) {
+            delta = elementRect.bottom - paneRect.bottom + margin;
+        }
+    } else if (elementRect.top < paneRect.top + margin || elementRect.top > paneRect.bottom - margin) {
+        delta = elementRect.top - paneRect.top - margin;
+    }
+
+    if (delta !== 0) {
+        pane.scrollTop += delta;
+    }
+}
+
+function stabilizeDetailsScroll(detailsId: 'rules-details' | 'history-details'): void {
+    const details = el<HTMLDetailsElement>(detailsId);
+    const summary = details.querySelector('summary');
+    if (!summary) {
+        return;
+    }
+
+    summary.addEventListener('click', () => {
+        const pane = el('pane-results');
+        const previousScrollTop = pane.scrollTop;
+        requestAnimationFrame(() => {
+            if (pane.scrollTop < previousScrollTop - 12) {
+                pane.scrollTop = previousScrollTop;
+            }
+            if (details.open) {
+                nudgeElementIntoPaneView(pane, details);
+            }
+        });
+    });
+}
+
 function toggleSection(id: 'params' | 'ps'): void {
     const body  = el(`${id}-body`);
     const arrow = el(`${id}-arrow`);
@@ -102,6 +146,7 @@ function applyFileSelected(role: 'xml' | 'xsl', fsPath: string, fileName: string
     if (role === 'xml') { xmlFsPath = fsPath; } else { xslFsPath = fsPath; }
     const link = el(`${role}-filename`);
     link.textContent = fileName;
+    link.title = fsPath;
     link.classList.remove('empty');
     const locked = role === 'xml' ? locks.xml : locks.xsl;
     el(`clear-${role}-btn`).style.display = locked ? 'none' : '';
@@ -112,6 +157,7 @@ function clearFile(role: 'xml' | 'xsl'): void {
     if (role === 'xml') { xmlFsPath = ''; } else { xslFsPath = ''; }
     const link = el(`${role}-filename`);
     link.textContent = role === 'xml' ? 'Click to select XML file\u2026' : 'Click to select XSL file\u2026';
+    link.title = '';
     link.classList.add('empty');
     el(`clear-${role}-btn`).style.display = 'none';
     if (role === 'xsl') { renderParams([]); }
@@ -618,6 +664,217 @@ function renderIssues(issueList: ValidationIssueSummary[]): void {
     container.appendChild(table);
 }
 
+function formatRuleStatus(rule: ValidationRuleResultSummary): { text: string; className: string } {
+    if (rule.status === 'passed' || (!rule.status && rule.passed)) {
+        return { text: 'Passed', className: 'status-pass' };
+    }
+    if (rule.status === 'skipped') {
+        return { text: 'Not run', className: 'status-skip' };
+    }
+    return { text: 'Failed', className: 'status-fail' };
+}
+
+function formatRuleSource(source: ValidationRuleResultSummary['source']): string {
+    switch (source) {
+        case 'xsd':
+            return 'XSD';
+        case 'schematron':
+            return 'Schematron';
+        case 'phive':
+        default:
+            return 'PHIVE';
+    }
+}
+
+function ruleStatusTitle(rule: ValidationRuleResultSummary): string {
+    if (rule.status === 'skipped') {
+        return 'PHIVE reported this validation layer as skipped, so it was not executed for this run.';
+    }
+    if (rule.status === 'passed' || rule.passed) {
+        return 'This validation layer ran without reported errors.';
+    }
+    return 'This validation layer reported one or more errors.';
+}
+
+function isArtifactPath(value: string): boolean {
+    return /[\\/]/.test(value) || /\.(xsd|xslt|sch|xml)$/i.test(value);
+}
+
+function formatRuleId(rule: ValidationRuleResultSummary): string {
+    if (rule.status === 'skipped' && isArtifactPath(rule.ruleId)) {
+        return '\u2014';
+    }
+    return rule.ruleId || '\u2014';
+}
+
+function formatRuleDescription(rule: ValidationRuleResultSummary): string {
+    if (rule.status === 'skipped' && isArtifactPath(rule.description)) {
+        return 'Validation layer was not run';
+    }
+    if (rule.description && rule.description !== rule.ruleId) {
+        return rule.description;
+    }
+    if (isArtifactPath(rule.description)) {
+        return tailPath(rule.description, 4);
+    }
+    return rule.description || '\u2014';
+}
+
+function renderRuleResults(ruleResults: ValidationRuleResultSummary[] = []): void {
+    const section = el<HTMLDetailsElement>('rules-details');
+    const container = el('rules-table-container');
+    clearChildren(container);
+
+    section.style.display = '';
+
+    if (ruleResults.length === 0) {
+        section.open = false;
+        const hint = document.createElement('div');
+        hint.className = 'hint';
+        hint.setAttribute('style', 'padding:6px;');
+        hint.textContent = 'No rule details for this validation run.';
+        container.appendChild(hint);
+        return;
+    }
+    section.open = true;
+
+    const table = document.createElement('div');
+    table.className = 'mini-table';
+
+    const header = document.createElement('div');
+    header.className = 'mini-header rule-header';
+    for (const label of ['Source', 'Status', 'Rule ID', 'Details']) {
+        const cell = document.createElement('span');
+        cell.textContent = label;
+        header.appendChild(cell);
+    }
+    table.appendChild(header);
+
+    ruleResults.forEach(rule => {
+        const row = document.createElement('div');
+        row.className = 'mini-row rule-row';
+        const status = formatRuleStatus(rule);
+        const source = formatRuleSource(rule.source);
+        const ruleId = formatRuleId(rule);
+        const description = formatRuleDescription(rule);
+
+        row.title = `Source: ${source}\nStatus: ${status.text}\nRule ID: ${rule.ruleId || '-'}\nDetails: ${rule.description || '-'}`;
+        row.appendChild(makeSpan('rule-text rule-source', source, undefined, source));
+        row.appendChild(makeSpan(`status-chip ${status.className}`.trim(), status.text, undefined, ruleStatusTitle(rule)));
+        row.appendChild(makeSpan('rule-text rule-id', ruleId, undefined, rule.ruleId || 'No rule ID reported.'));
+        row.appendChild(makeSpan('rule-text-wrap rule-description', description, undefined, rule.description || description));
+        table.appendChild(row);
+    });
+
+    container.appendChild(table);
+}
+
+function formatHistoryTimestamp(timestamp: number): { date: string; time: string; title: string } {
+    const date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) {
+        return { date: '\u2014', time: '\u2014', title: 'Invalid timestamp' };
+    }
+    return {
+        date: date.toLocaleDateString(),
+        time: date.toLocaleTimeString(),
+        title: date.toLocaleString(),
+    };
+}
+
+function appendLabeledLine(container: HTMLElement, label: string, value: string, cls = 'history-line', title?: string): void {
+    const line = document.createElement('div');
+    line.className = cls;
+    const labelNode = document.createElement('span');
+    labelNode.className = 'history-label';
+    labelNode.textContent = label;
+    const valueNode = document.createElement('span');
+    valueNode.className = 'history-value';
+    valueNode.textContent = value;
+    valueNode.title = title ?? value;
+    line.appendChild(labelNode);
+    line.appendChild(valueNode);
+    container.appendChild(line);
+}
+
+function appendValueLine(container: HTMLElement, value: string, title?: string): void {
+    const line = document.createElement('div');
+    line.className = 'history-value history-value-line';
+    line.textContent = value;
+    line.title = title ?? value;
+    container.appendChild(line);
+}
+
+function renderValidationHistory(entries: ValidationHistoryEntryMessage[]): void {
+    const container = el('history-table-container');
+    clearChildren(container);
+
+    if (entries.length === 0) {
+        const hint = document.createElement('div');
+        hint.className = 'hint';
+        hint.setAttribute('style', 'padding:6px;');
+        hint.textContent = 'No validation history yet.';
+        container.appendChild(hint);
+        return;
+    }
+
+    const table = document.createElement('div');
+    table.className = 'mini-table';
+
+    const header = document.createElement('div');
+    header.className = 'mini-header history-header';
+    for (const label of ['When', 'Counts', 'Document']) {
+        const cell = document.createElement('span');
+        cell.textContent = label;
+        header.appendChild(cell);
+    }
+    table.appendChild(header);
+
+    entries.forEach(entry => {
+        const row = document.createElement('div');
+        row.className = 'mini-row history-row';
+        row.title = `XML: ${entry.xmlPath}${entry.xsltPath ? `\nXSLT: ${entry.xsltPath}` : ''}${entry.outputUri ? `\nOutput: ${entry.outputUri}` : ''}`;
+
+        const timestamp = formatHistoryTimestamp(entry.timestamp);
+
+        const whenCell = document.createElement('div');
+        whenCell.className = 'history-stack';
+        whenCell.title = timestamp.title;
+        appendValueLine(whenCell, timestamp.date, timestamp.title);
+        appendValueLine(whenCell, timestamp.time, timestamp.title);
+
+        const countsCell = document.createElement('div');
+        countsCell.className = 'history-stack counts-stack';
+        appendLabeledLine(countsCell, 'Total', String(entry.issueCount), 'history-line count-total');
+        appendLabeledLine(countsCell, 'Errors', String(entry.errorCount), 'history-line count-error');
+        appendLabeledLine(countsCell, 'Warnings', String(entry.warningCount), 'history-line count-warning');
+        appendLabeledLine(countsCell, 'Info', String(entry.infoCount), 'history-line count-info');
+
+        const docCell = document.createElement('div');
+        docCell.className = 'history-stack history-doc';
+        appendLabeledLine(docCell, 'XML', basename(entry.xmlPath), 'history-line', entry.xmlPath);
+        appendLabeledLine(docCell, 'Path', abbreviatePath(entry.xmlPath), 'history-line', entry.xmlPath);
+
+        if (entry.detectedProfile) {
+            appendLabeledLine(docCell, 'Profile', entry.detectedProfile);
+        }
+
+        if (entry.xsltPath) {
+            appendLabeledLine(docCell, 'XSLT', abbreviatePath(entry.xsltPath), 'history-line', entry.xsltPath);
+        }
+
+        if (entry.outputUri) {
+            appendLabeledLine(docCell, 'Output', abbreviatePath(entry.outputUri), 'history-line', entry.outputUri);
+        }
+
+        row.appendChild(whenCell);
+        row.appendChild(countsCell);
+        row.appendChild(docCell);
+        table.appendChild(row);
+    });
+
+    container.appendChild(table);
+}
+
 function stackLabel(stack?: { stackId: string; primaryRulesVersion?: string; directVersions: { ddd: string; phive: string; rules: string } } | null): string {
     if (!stack) {
         return '\u2014';
@@ -764,7 +1021,13 @@ window.addEventListener('message', (event: MessageEvent) => {
             updateRevalidateBtn();
             updateBadges(msg.errorCount, msg.warningCount, msg.infoCount);
             renderIssues(msg.issues);
+            renderRuleResults(msg.ruleResults);
+            el('results-actions').style.display = msg.exportAvailable ? '' : 'none';
+            el<HTMLButtonElement>('btn-export-report').style.display = msg.exportAvailable ? '' : 'none';
             el('last-run-meta').textContent = msg.detectedProfile ? `Detected: ${msg.detectedProfile}` : '';
+            break;
+        case 'VALIDATION_HISTORY':
+            renderValidationHistory(msg.history);
             break;
         case 'PHIVE_STATUS':
             updatePhive(
@@ -862,8 +1125,11 @@ function attachEventListeners(): void {
         if (xslFsPath) { doTransform(); } else { vscode.postMessage({ type: 'VALIDATE_REQUEST', xmlPath: xmlFsPath }); }
     });
     el('btn-revalidate').addEventListener('click', () => vscode.postMessage({ type: 'VALIDATE_REQUEST' }));
+    el('btn-export-report').addEventListener('click', () => vscode.postMessage({ type: 'EXPORT_REPORT' }));
     el('btn-check-phive').addEventListener('click', checkPhiveUpdate);
     el('btn-rollback-phive').addEventListener('click', rollbackPhive);
+    stabilizeDetailsScroll('rules-details');
+    stabilizeDetailsScroll('history-details');
 }
 attachEventListeners();
 // Notify the host that the webview JS is loaded and the message listener is active.
